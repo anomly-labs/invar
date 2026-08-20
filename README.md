@@ -1,5 +1,8 @@
 # INVAR
 
+*Short for **invariant** — in physics, the quantity every observer computes
+identically, no matter their frame of reference. Now your AI has one.*
+
 **Local AI that proves its work.** INVAR runs LLMs on your own hardware and gives
 every answer a *worldline*: a hash-chained, re-executable receipt binding the
 runtime, model weights, prompt, and parameters to the output. Verify anything
