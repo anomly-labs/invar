@@ -1,0 +1,20 @@
+# Copyright (c) 2026 Anomly, Inc. All rights reserved. Author: Ry Bruscoe.
+# systemd unit — INVAR Ledger (licensed team plane). Sits behind your TLS proxy.
+[Unit]
+Description=INVAR Ledger collection plane
+After=network.target
+
+[Service]
+Environment=INVAR_LICENSE=/etc/invar/license.invar
+Environment=LEDGER_DIR=/var/lib/invar-ledger
+Environment=LEDGER_TOKEN=CHANGE_ME
+# Environment=HOST=0.0.0.0   # only behind TLS termination
+ExecStart=/usr/local/bin/invar ledger
+Restart=on-failure
+DynamicUser=true
+StateDirectory=invar-ledger
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

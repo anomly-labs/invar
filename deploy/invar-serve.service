@@ -1,0 +1,18 @@
+# Copyright (c) 2026 Anomly, Inc. All rights reserved. Author: Ry Bruscoe.
+# systemd unit — INVAR agent. Install:
+#   cp deploy/invar-serve.service ~/.config/systemd/user/  (edit MODEL below)
+#   systemctl --user daemon-reload && systemctl --user enable --now invar-serve
+[Unit]
+Description=INVAR receipted local AI endpoint
+After=network.target
+
+[Service]
+Environment=MODEL=%h/.invar/models/model.gguf
+# Optional fleet push: Environment=LEDGER_URL=... LEDGER_TOKEN=... INVAR_DEVICE_ID=...
+ExecStart=%h/.local/bin/invar serve --model ${MODEL} --worldline %h/.invar/worldline.jsonl
+Restart=on-failure
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=default.target

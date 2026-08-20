@@ -1,0 +1,20 @@
+# Copyright (c) 2026 Anomly, Inc. All rights reserved. Author: Ry Bruscoe.
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "anomly-invar"
+version = "0.1.0"
+description = "INVAR — receipted local AI: every inference carries a re-executable, hash-chained worldline receipt"
+readme = { text = "INVAR — receipted local AI by Anomly, Inc. Apache-2.0.", content-type = "text/plain" }
+requires-python = ">=3.10"
+license = { text = "Apache-2.0" }
+authors = [{ name = "Anomly, Inc." }]
+dependencies = ["cryptography>=41"]
+
+[project.scripts]
+invar = "invar.cli:main"
+
+[tool.setuptools]
+packages = ["invar"]
