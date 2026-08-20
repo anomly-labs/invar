@@ -25,6 +25,7 @@ import hmac
 import json
 import os
 import sys
+import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -35,6 +36,7 @@ SECRET = os.environ.get("STRIPE_WEBHOOK_SECRET", "")
 KEY = os.environ.get("ISSUING_KEY_PATH", "")
 OUTBOX = os.environ.get("OUTBOX_DIR", "outbox")
 TOLERANCE = 300  # seconds, per Stripe docs
+_ISSUE_LOCK = threading.Lock()  # serialize duplicate-delivery dedup
 
 PLANS = {
     "invar-developer-monthly": {"tier": "ledger", "months": 1},   # personal Ledger, seats=1..5 devices
@@ -84,8 +86,15 @@ def handle_event(evt: dict) -> str | None:
     sess = evt["data"]["object"]
     sid = sess["id"]
     done_marker = os.path.join(OUTBOX, f"{sid}.done")
-    if os.path.exists(done_marker):
-        return "duplicate"
+    # concurrent duplicate deliveries (Stripe retries) could both pass an
+    # unguarded exists() check and double-issue; serialize the whole issue path.
+    with _ISSUE_LOCK:
+        if os.path.exists(done_marker):
+            return "duplicate"
+        return _issue_locked(sess, sid, done_marker)
+
+
+def _issue_locked(sess: dict, sid: str, done_marker: str) -> str | None:
     email = (sess.get("customer_details") or {}).get("email") or sess.get(
         "customer_email")
     if not email:

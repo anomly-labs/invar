@@ -84,8 +84,13 @@ class License:
         self.expires = manifest.get("expires")
 
     def expired(self) -> bool:
-        return (self.expires is not None
-                and _dt.date.today().isoformat() > self.expires)
+        if self.expires is None:
+            return False
+        try:                                   # a malformed expires -> treat as expired
+            _dt.date.fromisoformat(self.expires)
+        except (ValueError, TypeError):
+            return True
+        return _dt.date.today().isoformat() > self.expires
 
 
 def check(path: str, trusted: list[str] | None = None) -> License | None:

@@ -21,6 +21,7 @@ import hashlib
 import json
 import os
 import subprocess
+import threading
 import time
 
 from .crcore import canonical_bytes, certificate_of, digest_bytes  # noqa: F401
@@ -98,6 +99,7 @@ class Worldline:
 
     def __init__(self, path: str):
         self.path = path
+        self._lock = threading.Lock()
         self.tip = self.GENESIS
         if os.path.exists(path):
             with open(path) as f:
@@ -105,11 +107,12 @@ class Worldline:
                     self.tip = json.loads(line)["chain"]
 
     def append(self, entry: dict) -> None:
-        assert entry["manifest"]["prev_chain"] == self.tip, "chain fork"
-        with open(self.path, "a") as f:
-            f.write(json.dumps(entry, separators=(",", ":"),
-                               sort_keys=True) + "\n")
-        self.tip = entry["chain"]
+        with self._lock:
+            assert entry["manifest"]["prev_chain"] == self.tip, "chain fork"
+            with open(self.path, "a") as f:
+                f.write(json.dumps(entry, separators=(",", ":"),
+                                   sort_keys=True) + "\n")
+            self.tip = entry["chain"]
 
     def infer_with_receipt(self, binary: str, model: str, prompt: str,
                            n_predict: int = 128, seed: int = 1,

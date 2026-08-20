@@ -195,6 +195,21 @@ def main():
         ok = (st == 200 and all(r["ok"] for r in ex["packet"]["verification"])
               and certificate_of(ex["packet"]) == ex["packet_certificate"])
         report("ledger: certified export recomputes", ok)
+        # concurrency: 8 simultaneous ingests of the SAME entry for one device
+        # must accept exactly once (per-device lock; the 2026-08-20 race regression)
+        store_r = LedgerStore(os.path.join(tmp, "ledger-race"))
+        rentry = entries[0]
+        barrier, rres = threading.Barrier(8), []
+        def _push():
+            barrier.wait()
+            rres.append(store_r.ingest("racedev", [rentry]))
+        rts = [threading.Thread(target=_push) for _ in range(8)]
+        [t.start() for t in rts]; [t.join() for t in rts]
+        acc = sum(r.get("accepted", 0) for r in rres)
+        nlines = sum(1 for _ in open(os.path.join(tmp, "ledger-race",
+                                                   "racedev.jsonl")))
+        report("ledger: concurrent-ingest race (8 threads -> 1 accept)",
+               acc == 1 and nlines == 1, f"accepted={acc} lines={nlines}")
         lsrv.shutdown()
 
         # ---- 5. full stack (LLM-gated) ----

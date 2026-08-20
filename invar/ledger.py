@@ -25,6 +25,7 @@ import json
 import os
 import re
 import sys
+import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
@@ -37,9 +38,20 @@ _DEV_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
 
 
 class LedgerStore:
+    """Per-device locking makes read-tip -> verify -> append ATOMIC under the
+    threading server: without it, concurrent pushes for one device both verify
+    against the same tip and both append — a duplicated/forked chain in the
+    custody log (found by an 8-thread race test, 2026-08-20; test in suite)."""
+
     def __init__(self, root: str):
         self.root = root
         os.makedirs(root, exist_ok=True)
+        self._master = threading.Lock()
+        self._locks: dict[str, threading.Lock] = {}
+
+    def _device_lock(self, device: str) -> threading.Lock:
+        with self._master:
+            return self._locks.setdefault(device, threading.Lock())
 
     def _path(self, device: str) -> str:
         assert _DEV_RE.match(device), "bad device id"
@@ -69,6 +81,10 @@ class LedgerStore:
         return True, "ok"
 
     def ingest(self, device: str, entries: list[dict]) -> dict:
+        with self._device_lock(device):
+            return self._ingest_locked(device, entries)
+
+    def _ingest_locked(self, device: str, entries: list[dict]) -> dict:
         prev = self.tip(device)
         accepted = 0
         for i, e in enumerate(entries):
@@ -83,6 +99,10 @@ class LedgerStore:
         return {"accepted": accepted, "tip": prev}
 
     def export(self, device: str, collector: dict) -> dict:
+        with self._device_lock(device):
+            return self._export_locked(device, collector)
+
+    def _export_locked(self, device: str, collector: dict) -> dict:
         entries, report, prev = [], [], GENESIS
         p = self._path(device)
         if os.path.exists(p):
