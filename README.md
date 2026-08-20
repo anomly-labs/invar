@@ -29,6 +29,8 @@ entry 0: ACCEPT — re-executed, output digest matches
 
 Edit one byte of the log and verification **REJECTS**. That's the product.
 
+![INVAR in action — install, ask, receipt, verify, tamper, reject](docs/demo.svg)
+
 ## Install
 
 On the system you already run — nothing flashed, nothing replaced:
