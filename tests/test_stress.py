@@ -22,7 +22,6 @@ import sys
 import tempfile
 import threading
 import urllib.request
-from http.server import ThreadingHTTPServer
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.join(HERE, "..")
@@ -30,7 +29,7 @@ sys.path.insert(0, ROOT)
 
 from invar.crcore import canonical_bytes, certificate_of, ReceiptError  # noqa: E402
 from invar.worldline import Worldline, verify_worldline                # noqa: E402
-from invar.serve import make_handler as serve_handler                  # noqa: E402
+from invar.serve import _Server, make_handler as serve_handler         # noqa: E402
 
 FAKE_SRC = open(os.path.join(HERE, "fake_llama.py")).read()
 _fails = 0
@@ -56,7 +55,9 @@ def sec_serve_concurrency(tmp, n=25):
     model = os.path.join(tmp, "m.gguf"); open(model, "wb").write(b"GGUF\x00weights")
     wlp = os.path.join(tmp, "concurrent.jsonl")
     wl = Worldline(wlp)
-    srv = ThreadingHTTPServer(("127.0.0.1", 0), serve_handler(wl, binary, model))
+    # the PRODUCT server class (request_queue_size=64) — a raw ThreadingHTTPServer
+    # keeps the OS default backlog (5) and drops barrier-synchronized connects
+    srv = _Server(("127.0.0.1", 0), serve_handler(wl, binary, model))
     port = srv.server_address[1]
     threading.Thread(target=srv.serve_forever, daemon=True).start()
 
