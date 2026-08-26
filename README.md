@@ -1,5 +1,8 @@
 # INVAR
 
+[![tests](https://github.com/anomly-labs/invar/actions/workflows/tests.yml/badge.svg)](https://github.com/anomly-labs/invar/actions/workflows/tests.yml)
+[![license: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
+
 *Short for **invariant** — in physics, the quantity every observer computes
 identically, no matter their frame of reference. Now your AI has one.*
 
@@ -72,10 +75,24 @@ gatekeep.
 
 ## Tests
 
+The full battery runs **offline** — no model, GPU, or network. A deterministic
+llama.cpp stand-in covers the inference / verification / re-execution paths, so
+even those run in CI. Only dependency is `cryptography`.
+
 ```
-tests/run_all.sh        # structure, licensing, webhook, ledger — no model needed
-INVAR_TEST_MODEL=... INVAR_TEST_BINARY=... tests/run_all.sh   # + live re-execution
+sh tests/run_all.sh
 ```
+
+Six gates run: fine-grained unit coverage (~97%), integration smokes, a
+serve-concurrency + property-fuzz stage, and release / installer / deploy sanity
+— plus a mutation battery that proves the suite catches real bugs. To exercise a
+real model instead of the stand-in:
+
+```
+INVAR_TEST_MODEL=your.gguf INVAR_TEST_BINARY=$(command -v llama-cli) python3 tests/test_invar.py
+```
+
+Details: [tests/README.md](tests/README.md).
 
 ## License
 
