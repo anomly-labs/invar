@@ -8,8 +8,8 @@ identically under any conforming CR implementation.
 Primary check needs only the published conformance-vector JSON (the spec's own
 canonical output) — no numpy, no reference module — so it is CI-portable. It SKIPs
 cleanly when the vectors aren't present (as in the public checkout). Point it with
-CR_VECTORS=/path/to/CR-v0.1-conformance-vectors.json; default location is the
-sibling open-cr checkout.
+CR_VECTORS=/path/to/CR-v0.1-conformance-vectors.json; the default is the vendored
+copy in tests/vectors/ (published spec vectors, kept byte-identical upstream).
 
   vectors covered: canonical/* (canonical_bytes + digest_bytes) and receipt|chain|
   refuse/* (canonical round-trip + certificate_of). tensor/* need numpy's
@@ -32,9 +32,13 @@ sys.path.insert(0, ROOT)
 
 from invar import crcore as inv  # noqa: E402
 
-VECTORS = os.environ.get(
-    "CR_VECTORS",
-    os.path.expanduser("~/development/open-cr/spec/CR-v0.1-conformance-vectors.json"))
+_HERE = os.path.dirname(os.path.abspath(__file__))
+_VENDORED = os.path.join(_HERE, "vectors", "CR-v0.1-conformance-vectors.json")
+# Resolution order: explicit env var > the vendored copy of the published vectors
+# (github.com/anomly-labs/computation-receipts, spec/) > a sibling spec checkout.
+VECTORS = os.environ.get("CR_VECTORS") or (
+    _VENDORED if os.path.exists(_VENDORED)
+    else os.path.expanduser("~/development/open-cr/spec/CR-v0.1-conformance-vectors.json"))
 OPEN_CR_PY = os.environ.get(
     "OPEN_CR_PYTHON", os.path.expanduser("~/development/open-cr/python"))
 

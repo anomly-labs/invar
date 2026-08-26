@@ -28,6 +28,12 @@ import sys
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+
+class _Server(ThreadingHTTPServer):
+    # The OS default listen backlog (5) resets concurrent connects beyond it; a
+    # fleet ingest endpoint must queue honest burst traffic, not drop it.
+    request_queue_size = 64
 from urllib.parse import parse_qs, urlparse
 
 from .crcore import certificate_of, digest_bytes
@@ -204,8 +210,8 @@ def main():
     port = int(os.environ.get("PORT", "8579"))
     print(f"INVAR Ledger on {host}:{port}  licensee={lic.email} "
           f"dir={store.root}", flush=True)
-    ThreadingHTTPServer((host, port),
-                        make_handler(store, token, collector)).serve_forever()
+    _Server((host, port),
+            make_handler(store, token, collector)).serve_forever()
 
 
 if __name__ == "__main__":

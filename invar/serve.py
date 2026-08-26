@@ -27,6 +27,12 @@ from .worldline import PROFILE, Worldline
 _lock = threading.Lock()
 
 
+class _Server(ThreadingHTTPServer):
+    # The OS default listen backlog (5) resets concurrent connects beyond it; a
+    # receipted endpoint must queue honest burst traffic, not drop it.
+    request_queue_size = 64
+
+
 def _push_to_ledger(entry: dict) -> None:
     """Optional fleet push: LEDGER_URL + LEDGER_TOKEN (+ INVAR_DEVICE_ID) env.
     Best-effort by design — a Ledger outage must never fail local inference;
@@ -124,8 +130,8 @@ def main():
     ap.add_argument("--worldline", default="worldline.jsonl")
     a = ap.parse_args()
     wl = Worldline(a.worldline)
-    srv = ThreadingHTTPServer((a.host, a.port),
-                              make_handler(wl, a.binary, a.model))
+    srv = _Server((a.host, a.port),
+                  make_handler(wl, a.binary, a.model))
     print(f"receipted endpoint on {a.host}:{a.port}  model={os.path.basename(a.model)} "
           f"profile={PROFILE} worldline={a.worldline}")
     srv.serve_forever()
