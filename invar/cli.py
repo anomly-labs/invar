@@ -8,16 +8,28 @@ is re-run and its output digest compared. Prompts come from the evidence text
 stored beside each receipt (validated against the certified prompt digest
 before use, so tampered evidence text cannot spoof a pass).
 
-  python3 -m invar.cli verify worldline.jsonl [--binary ...] [--no-reexecute]
+  invar verify worldline.jsonl [--binary llama-cli --model x.gguf]   # llama.cpp
+  invar verify worldline.jsonl [--ollama-host URL]                    # Ollama
+      (Ollama entries name their model tag in the receipt, so nothing else is
+       needed when the server is reachable; --model overrides the tag)
+  invar verify worldline.jsonl --no-reexecute        # structural + chain only
 Exit code 0 = every entry ACCEPT; 1 = any REJECT.
 """
 from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 
-from .worldline import digest_bytes, verify_worldline
+from .backends import (LLAMACPP_PROFILE, OLLAMA_PROFILE, LlamaCppBackend,
+                       OllamaBackend)
+from .worldline import digest_bytes, verify_entries
+
+
+def _profiles(path: str) -> set[str]:
+    with open(path) as f:
+        return {json.loads(line)["manifest"].get("profile", "") for line in f}
 
 
 def main():
@@ -44,9 +56,13 @@ def main():
     v = sub.add_parser("verify", help="verify a worldline receipt log")
     v.add_argument("worldline")
     v.add_argument("--binary", default=None,
-                   help="llama.cpp binary (default: from first entry's deployment)")
+                   help="llama.cpp binary for llama.cpp entries; or the ollama "
+                        "binary to hash for Ollama entries (INVAR_OLLAMA_BIN)")
     v.add_argument("--model", default=None,
-                   help="model gguf path (needed for re-execution)")
+                   help="gguf path (llama.cpp entries) or Ollama tag override")
+    v.add_argument("--ollama-host", default=None,
+                   help="Ollama server for Ollama entries (default OLLAMA_HOST "
+                        "or http://127.0.0.1:11434)")
     v.add_argument("--no-reexecute", action="store_true",
                    help="structural + chain checks only")
     a = ap.parse_args()
@@ -62,13 +78,25 @@ def main():
                     prompts[d] = pt   # evidence text matches the certified digest
 
     reexec = not a.no_reexecute
-    if reexec and (not a.binary or not a.model):
-        print("re-execution needs --binary and --model; "
-              "running structural checks only", file=sys.stderr)
-        reexec = False
+    backends = {}
+    if reexec:
+        seen = _profiles(a.worldline)
+        if LLAMACPP_PROFILE in seen:
+            if a.binary and a.model:
+                backends[LLAMACPP_PROFILE] = LlamaCppBackend(a.binary, a.model)
+            else:
+                print("llama.cpp entries: re-execution needs --binary and "
+                      "--model; running structural checks on them only",
+                      file=sys.stderr)
+        if OLLAMA_PROFILE in seen:
+            # one backend per model tag named in the receipts (--model overrides)
+            override = a.model if (a.model and not os.path.exists(a.model)) else None
+            backends[OLLAMA_PROFILE] = lambda tag: OllamaBackend(
+                override or tag, host=a.ollama_host, binary=a.binary)
+        if not backends:
+            reexec = False
 
-    results = verify_worldline(a.worldline, a.binary or "", a.model or "",
-                               prompts, reexecute=reexec)
+    results = verify_entries(a.worldline, prompts, backends, reexecute=reexec)
     bad = 0
     for i, ok, why in results:
         print(f"entry {i}: {'ACCEPT' if ok else 'REJECT'} — {why}")

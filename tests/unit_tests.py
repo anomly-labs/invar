@@ -9,7 +9,9 @@ Crucially, the inference / parse / re-execution paths that test_invar.py SKIPs
 without a real model are covered HERE via tests/fake_llama.py — a llama.cpp
 stand-in that emits parseable, deterministic output. No GPU, no weights, no network.
 
-Sections: crcore · worldline(+parse+reexec) · license · ledger · serve · cli
+Sections: crcore · worldline(+parse+reexec) · license · ledger · serve · cli · ollama
+(the Ollama backend runs against tests/fake_ollama.py — a stand-in server — so its
+pin / generate / re-execution / drift paths are covered offline too)
 Run:  python3 tests/unit_tests.py     (or via tests/run_all.sh, which runs both)
 """
 from __future__ import annotations
@@ -47,6 +49,12 @@ from invar.license import check as lic_check                               # noq
 from invar.ledger import (GENESIS, LedgerStore,                            # noqa: E402
                           make_handler as ledger_handler)
 from invar.serve import make_handler as serve_handler, _push_to_ledger     # noqa: E402
+from invar import backends as BE                                          # noqa: E402
+from invar.backends import (OLLAMA_PROFILE, LLAMACPP_PROFILE, OllamaBackend,  # noqa: E402
+                            OllamaError, make_backend, looks_like_ollama_tag)
+from invar.worldline import verify_entries                                # noqa: E402
+sys.path.insert(0, HERE)
+from fake_ollama import FakeOllama                                        # noqa: E402
 
 FAKE_SRC = open(os.path.join(HERE, "fake_llama.py")).read()
 
@@ -813,6 +821,207 @@ def sec_webhook(tmp, lic):
           f"issued={len(issued)} files={len(lic_files)}")
 
 
+# ============================================================ ollama backend
+def sec_ollama(tmp, art):
+    print("\n== ollama backend: pins, generate, re-exec verify, serve, cli ==")
+    fo = FakeOllama()
+    host = fo.start()
+    obin = mk_binary(tmp, "ollama-bin", salt=b"ollama")     # any file: it's hashed
+
+    # -- deployment pins
+    be = OllamaBackend("fake-model", host=host, binary=obin, num_gpu=0)
+    d = be.deployment()
+    check("ollama deployment: runtime pinned by binary digest",
+          d["runtime_digest"] == file_digest(obin) and d["runtime_pinned_by"] == "binary"
+          and d["runtime_version"] == fo.version)
+    check("ollama deployment: model manifest digest from /api/tags",
+          d["model_digest"] == "sha256:" + "a" * 64)
+    check("ollama deployment: weights blob digest parsed from Modelfile FROM",
+          d["weights_digest"] == "sha256:" + "b" * 64)
+    check("ollama deployment: tag normalisation (fake-model == fake-model:latest)",
+          d["model_name"] == "fake-model")
+    be_v = OllamaBackend("other:1b", host=host, binary=os.path.join(tmp, "nope"))
+    dv = be_v.deployment()
+    check("ollama deployment: no binary -> version-only pin, and SAYS so",
+          dv["runtime_digest"] == "ollama-version:" + fo.version
+          and dv["runtime_pinned_by"] == "version")
+    check("ollama deployment: missing model -> OllamaError",
+          raises(OllamaError, OllamaBackend("missing:7b", host=host).deployment))
+    check("ollama unreachable -> OllamaError",
+          raises(OllamaError, OllamaBackend("x", host="http://127.0.0.1:9").deployment))
+    check("ollama host without scheme gets http://",
+          OllamaBackend("x", host="127.0.0.1:11434").host == "http://127.0.0.1:11434")
+
+    # -- params
+    check("ollama params: num_gpu only when pinned",
+          "num_gpu" in be.params(8, 1) and "num_gpu" not in be_v.params(8, 1)
+          and be.params(8, 1)["temp"] == 0 and be.params(8, 1)["num_ctx"] == 2048)
+
+    # -- generate
+    p = be.params(16, 1)
+    g1, g2 = be.generate("hello", p), be.generate("hello", p)
+    check("ollama generate deterministic for same request", g1 == g2 and g1)
+    check("ollama generate differs with num_ctx",
+          OllamaBackend("fake-model", host=host, binary=obin, num_gpu=0,
+                        num_ctx=4096).generate("hello", {**p, "num_ctx": 4096}) != g1)
+    fo.fail_generate = True
+    check("ollama generate HTTP 500 -> OllamaError", raises(OllamaError, be.generate, "x", p))
+    fo.fail_generate = False
+
+    # -- worldline + verify (instance, factory, tamper, drift)
+    wlp = os.path.join(tmp, "ollama_wl.jsonl")
+    wl = Worldline(wlp)
+    out, e = wl.infer(be, "The capital of France is", n_predict=16)
+    check("ollama entry: profile + pins certified in manifest",
+          e["manifest"]["profile"] == OLLAMA_PROFILE
+          and e["manifest"]["computation"]["weights_digest"] == d["weights_digest"]
+          and e["certificate"] == certificate_of(e["manifest"]))
+    wl.infer(be, "Second prompt", n_predict=8)
+    prompts = {digest_bytes(t.encode()): t for t in ("The capital of France is", "Second prompt")}
+    res = verify_entries(wlp, prompts, {OLLAMA_PROFILE: be})
+    check("ollama verify (backend instance): re-executed, ACCEPT x2",
+          all(ok for _, ok, _ in res) and all("re-executed" in w for _, _, w in res))
+    res = verify_entries(wlp, prompts, {OLLAMA_PROFILE: lambda tag: OllamaBackend(
+        tag, host=host, binary=obin, num_gpu=0)})
+    check("ollama verify (factory per model tag): ACCEPT x2",
+          all(ok for _, ok, _ in res) and all("re-executed" in w for _, _, w in res))
+    res = verify_entries(wlp, prompts, {})
+    check("ollama verify (no backend): structure ok, not re-executed",
+          all(ok for _, ok, _ in res) and all("no backend" in w for _, _, w in res))
+    fo.flaky = True
+    res = verify_entries(wlp, prompts, {OLLAMA_PROFILE: be})
+    check("ollama verify: nondeterministic server -> REJECT digest differs",
+          not any(ok for _, ok, _ in res) and "output digest differs" in res[0][2])
+    fo.flaky = False
+    fo.models["fake-model:latest"] = ("e" * 64, "b" * 64)   # re-pulled tag, same blob
+    res = verify_entries(wlp, prompts, {OLLAMA_PROFILE: be})
+    check("ollama verify: model manifest changed -> REJECT deployment differs (model_digest)",
+          not res[0][1] and "model_digest" in res[0][2])
+    fo.models["fake-model:latest"] = ("a" * 64, "b" * 64)
+    res = verify_entries(wlp, prompts, {OLLAMA_PROFILE: OllamaBackend(
+        "fake-model", host=host, binary=mk_binary(tmp, "ollama-bin2", salt=b"upgraded"))})
+    check("ollama verify: different ollama binary -> REJECT deployment differs (runtime_digest)",
+          not res[0][1] and "runtime_digest" in res[0][2])
+    wl_v = Worldline(os.path.join(tmp, "ollama_wl_v.jsonl"))
+    wl_v.infer(be_v, "hi", n_predict=4)
+    fo.version = "1.0.0-fake"
+    res = verify_entries(wl_v.path, {digest_bytes(b"hi"): "hi"}, {OLLAMA_PROFILE: be_v})
+    check("ollama verify: version-only pin catches server upgrade",
+          not res[0][1] and "runtime_digest" in res[0][2])
+    fo.version = "0.99.0-fake"
+
+    # -- mixed worldline: llama.cpp entry then ollama entry, one file
+    mixed = Worldline(os.path.join(tmp, "mixed_wl.jsonl"))
+    mixed.infer_with_receipt(art["binA"], art["model"], "mixed one", n_predict=8)
+    mixed.infer(be, "mixed two", n_predict=8)
+    mp = {digest_bytes(b"mixed one"): "mixed one", digest_bytes(b"mixed two"): "mixed two"}
+    from invar.backends import LlamaCppBackend
+    res = verify_entries(mixed.path, mp, {LLAMACPP_PROFILE: LlamaCppBackend(art["binA"], art["model"]),
+                                          OLLAMA_PROFILE: be})
+    check("mixed worldline: both profiles re-executed and ACCEPT",
+          [ok for _, ok, _ in res] == [True, True]
+          and all("re-executed" in w for _, _, w in res))
+    res = verify_entries(mixed.path, mp, {OLLAMA_PROFILE: be})
+    check("mixed worldline: missing llama.cpp backend -> that entry structure-only",
+          res[0][1] and "no backend" in res[0][2] and "re-executed" in res[1][2])
+
+    # -- serve on the ollama backend: models list, stream, openai fields
+    swl = Worldline(os.path.join(tmp, "ollama_serve_wl.jsonl"))
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), serve_handler(swl, backend=be))
+    port = serve_bg(srv)
+    base = f"http://127.0.0.1:{port}"
+    hdr = {"Content-Type": "application/json"}
+    st, b = http("GET", f"{base}/health")
+    check("serve(ollama) health names backend + profile",
+          st == 200 and b["backend"] == "ollama" and b["profile"] == OLLAMA_PROFILE)
+    st, b = http("GET", f"{base}/v1/models")
+    check("serve /v1/models lists the served model (Open WebUI needs it)",
+          st == 200 and b["object"] == "list" and b["data"][0]["id"] == "fake-model")
+    st, r = http("POST", f"{base}/v1/chat/completions",
+                 {"messages": [{"role": "user", "content": "q"}], "max_tokens": 8}, hdr)
+    check("serve(ollama) completion: OpenAI fields id/created/usage + receipt",
+          st == 200 and r["id"].startswith("chatcmpl-") and "created" in r
+          and r["usage"]["total_tokens"] > 0
+          and r["receipt"]["profile"] == OLLAMA_PROFILE)
+    st, r = http("POST", f"{base}/v1/chat/completions",
+                 {"messages": [{"role": "user", "content": [
+                     {"type": "text", "text": "parts"},
+                     {"type": "image_url", "image_url": {"url": "data:,x"}}]}],
+                  "max_tokens": 8}, hdr)
+    check("serve: list-of-parts content -> text parts pinned (image ignored)",
+          st == 200 and r["receipt"]["manifest"]["inputs"]["prompt"] == digest_bytes(b"parts"))
+    st, r = http("POST", f"{base}/v1/chat/completions",
+                 {"messages": [{"role": "user", "content": [{"type": "image_url"}]}]}, hdr)
+    check("serve: parts with no text -> 400 empty prompt (not a crash)", st == 400)
+    req = urllib.request.Request(f"{base}/v1/chat/completions", method="POST",
+                                 data=json.dumps({"messages": [{"role": "user", "content": "q"}],
+                                                  "max_tokens": 8, "stream": True}).encode(),
+                                 headers=hdr)
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        ctype = resp.headers.get("Content-Type", "")
+        raw = resp.read().decode()
+    events = [ln[6:] for ln in raw.split("\n") if ln.startswith("data: ")]
+    chunks = [json.loads(x) for x in events if x != "[DONE]"]
+    check("serve stream=true -> text/event-stream ending in [DONE]",
+          ctype.startswith("text/event-stream") and events[-1] == "[DONE]")
+    check("serve stream: content chunk then finish chunk carrying the receipt",
+          len(chunks) == 2 and chunks[0]["choices"][0]["delta"]["content"]
+          and chunks[1]["choices"][0]["finish_reason"] == "stop"
+          and chunks[1]["receipt"]["certificate"].startswith("sha256:")
+          and chunks[0]["object"] == "chat.completion.chunk")
+    st, b = http("GET", f"{base}/v1/worldline/tail?n=2")
+    check("serve /v1/worldline/tail?n=2 -> last 2 full entries + tip",
+          st == 200 and len(b["entries"]) == 2 and b["tip"] == swl.tip
+          and b["entries"][-1]["chain"] == swl.tip
+          and b["entries"][-2]["manifest"]["inputs"]["prompt"] == digest_bytes(b"parts")
+          and b["entries"][-1]["manifest"]["inputs"]["prompt"] == digest_bytes(b"q"))
+    st, b = http("GET", f"{base}/v1/worldline/tail?n=x")
+    check("serve /v1/worldline/tail bad n -> 400", st == 400)
+    srv.shutdown()
+
+    # -- cli verify on an ollama worldline (auto-detects profile; env pin for binary)
+    import invar.cli as CLI
+
+    def run_cli(argv):
+        old = sys.argv[:]
+        sys.argv = argv
+        buf = io.StringIO()
+        code = 0
+        try:
+            with redirect_stdout(buf):
+                CLI.main()
+        except SystemExit as ex:
+            code = ex.code or 0
+        finally:
+            sys.argv = old
+        return code, buf.getvalue()
+
+    os.environ["INVAR_OLLAMA_BIN"] = obin
+    code, out = run_cli(["invar", "verify", wlp, "--ollama-host", host])
+    check("cli verify (ollama, auto from receipts): ALL ACCEPT re-executed",
+          code == 0 and "ALL ACCEPT" in out and out.count("re-executed") == 2, out.strip()[-60:])
+    code, out = run_cli(["invar", "verify", wlp, "--ollama-host", host, "--binary",
+                         mk_binary(tmp, "ollama-bin3", salt=b"other")])
+    check("cli verify (ollama, wrong --binary): REJECT deployment differs",
+          code == 1 and "runtime_digest" in out)
+    code, out = run_cli(["invar", "verify", mixed.path, "--ollama-host", host])
+    check("cli verify (mixed, no llama.cpp args): ollama re-exec + llama structure-only, exit 0",
+          code == 0 and "no backend" in out and "re-executed" in out)
+    del os.environ["INVAR_OLLAMA_BIN"]
+
+    # -- backend selection
+    check("looks_like_ollama_tag: tag yes, gguf path no, existing file no",
+          looks_like_ollama_tag("llama3.2") and looks_like_ollama_tag("hf.co/u/r:Q4")
+          and not looks_like_ollama_tag("/x/y/model.gguf")
+          and not looks_like_ollama_tag(art["model"]))
+    check("make_backend auto: tag -> ollama, file -> llamacpp",
+          make_backend("auto", "llama3.2", host=host).name == "ollama"
+          and make_backend("auto", art["model"], binary=art["binA"]).name == "llamacpp")
+    check("make_backend unknown kind -> ValueError",
+          raises(ValueError, make_backend, "vllm", "x"))
+    fo.stop()
+
+
 def main():
     tmp = tempfile.mkdtemp(prefix="invar-unit-")
     try:
@@ -824,6 +1033,7 @@ def main():
         sec_cli(tmp, art, lic)
         sec_edges(tmp, art, lic)
         sec_webhook(tmp, lic)
+        sec_ollama(tmp, art)
     finally:
         import shutil
         shutil.rmtree(tmp, ignore_errors=True)

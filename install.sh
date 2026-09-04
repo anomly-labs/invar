@@ -36,13 +36,18 @@ LLAMA="${INVAR_LLAMA_BIN:-$(command -v llama-cli || true)}"
 if [ -n "$LLAMA" ]; then
   echo "-> llama.cpp runtime: $LLAMA"
 else
-  echo "NOTE: no llama-cli found. Install llama.cpp (https://github.com/ggml-org/llama.cpp)"
-  echo "      or set INVAR_LLAMA_BIN. Receipt STRUCTURE verification works without it;"
-  echo "      inference and re-execution need it."
+  if command -v ollama >/dev/null 2>&1; then
+    echo "-> Ollama found: $(command -v ollama) — 'invar serve --model <tag>' uses it"
+  else
+    echo "NOTE: no llama-cli or ollama found. Install Ollama (https://ollama.com) or"
+    echo "      llama.cpp (https://github.com/ggml-org/llama.cpp), or set INVAR_LLAMA_BIN."
+    echo "      Receipt STRUCTURE verification works without either; inference and"
+    echo "      re-execution need one of them."
+  fi
 fi
 
 echo ""
 echo "INVAR installed."
 echo "  invar verify <worldline.jsonl>            # free, forever"
-echo "  invar serve --model <model.gguf>          # receipted local endpoint"
+echo "  invar serve --model <ollama-tag | model.gguf>   # receipted local endpoint"
 echo "  invar license verify <license.invar>      # check a license offline"

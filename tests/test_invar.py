@@ -11,10 +11,13 @@ Sections:
   3 webhook        Stripe-signature verify, issuance to outbox, bad-sig 400, idempotency
   4 ledger         license gate, authed ingest, tamper 422, fork 422, certified export
   5 full stack     serve -> auto-push -> ledger -> export all-verified
+  6 ollama         REAL Ollama server: pins, reproduce, re-exec verify, tamper, serve
 
 Env: INVAR_TEST_MODEL (gguf) + INVAR_TEST_BINARY (llama-cli) enable sections 1 & 5;
-without them those sections SKIP (structure-only coverage still runs). Run via
-tests/run_all.sh.
+without them those sections SKIP (structure-only coverage still runs).
+INVAR_TEST_OLLAMA_MODEL (+ optional INVAR_TEST_OLLAMA_HOST, INVAR_TEST_OLLAMA_NUM_GPU)
+enables section 6 against a real Ollama; without it, section 6 SKIPs (the offline
+unit suite covers the same paths against tests/fake_ollama.py). Run via tests/run_all.sh.
 """
 from __future__ import annotations
 
@@ -43,6 +46,11 @@ MODEL = os.environ.get("INVAR_TEST_MODEL", "")
 BINARY = os.environ.get("INVAR_TEST_BINARY", "")
 HAVE_LLM = bool(MODEL and BINARY and os.path.exists(MODEL)
                 and os.path.exists(BINARY))
+OLLAMA_MODEL = os.environ.get("INVAR_TEST_OLLAMA_MODEL", "")
+OLLAMA_HOST = os.environ.get("INVAR_TEST_OLLAMA_HOST") or None
+_ng = os.environ.get("INVAR_TEST_OLLAMA_NUM_GPU")
+OLLAMA_NUM_GPU = int(_ng) if _ng not in (None, "") else None
+HAVE_OLLAMA = bool(OLLAMA_MODEL)
 
 fails = 0
 
@@ -243,6 +251,55 @@ def main():
             s2.shutdown(); l2.shutdown()
         else:
             print("  [SKIP] full stack (set INVAR_TEST_MODEL + INVAR_TEST_BINARY)")
+
+        # ---------------------------------------------------------- 6 real Ollama
+        print("\n[6] Ollama backend against a REAL server")
+        if HAVE_OLLAMA:
+            from invar.backends import OLLAMA_PROFILE, OllamaBackend
+            from invar.worldline import verify_entries
+            ob = OllamaBackend(OLLAMA_MODEL, host=OLLAMA_HOST,
+                               num_gpu=OLLAMA_NUM_GPU)
+            dep = ob.deployment()
+            report("ollama: deployment resolves model + weights digests",
+                   dep["model_digest"].startswith("sha256:")
+                   and dep.get("weights_digest", "sha256:").startswith("sha256:"),
+                   f"runtime pinned by {dep['runtime_pinned_by']} "
+                   f"(ollama {dep['runtime_version']})")
+            owl = Worldline(os.path.join(tmp, "ollama_wl.jsonl"))
+            o1, e1 = owl.infer(ob, "The capital of France is", n_predict=16)
+            o2, e2 = owl.infer(ob, "The capital of France is", n_predict=16)
+            report("ollama: same pinned request reproduces on this deployment",
+                   o1 == o2 and e1["manifest"]["outputs"] == e2["manifest"]["outputs"],
+                   repr(o1[:60]))
+            pr = {e1["manifest"]["inputs"]["prompt"]: "The capital of France is"}
+            res = verify_entries(owl.path, pr, {OLLAMA_PROFILE: ob})
+            report("ollama: verify re-executes and ACCEPTs",
+                   all(ok for _, ok, _ in res) and "re-executed" in res[0][2])
+            t = os.path.join(tmp, "ollama_tamper.jsonl")
+            lines = open(owl.path).read().splitlines()
+            bad = json.loads(lines[0])
+            bad["manifest"]["outputs"]["text"] = "sha256:" + "0" * 64
+            open(t, "w").write(json.dumps(bad, separators=(",", ":"), sort_keys=True)
+                               + "\n")
+            res = verify_entries(t, pr, {OLLAMA_PROFILE: ob})
+            report("ollama: tampered output digest -> REJECT", not res[0][1])
+            os_ = ThreadingHTTPServer(("127.0.0.1", 0),
+                                      serve_handler(Worldline(os.path.join(
+                                          tmp, "ollama_srv.jsonl")), backend=ob))
+            osp = os_.server_address[1]
+            threading.Thread(target=os_.serve_forever, daemon=True).start()
+            st, r = http("POST", f"http://127.0.0.1:{osp}/v1/chat/completions",
+                         {"messages": [{"role": "user",
+                                        "content": "The capital of France is"}],
+                          "max_tokens": 16},
+                         {"Content-Type": "application/json"})
+            report("ollama: serve returns answer + ollama-profile receipt",
+                   st == 200 and r["receipt"]["profile"] == OLLAMA_PROFILE
+                   and r["choices"][0]["message"]["content"] != "")
+            os_.shutdown()
+        else:
+            print("  [SKIP] real Ollama (set INVAR_TEST_OLLAMA_MODEL, optionally "
+                  "INVAR_TEST_OLLAMA_HOST / INVAR_TEST_OLLAMA_NUM_GPU)")
 
     finally:
         shutil.rmtree(tmp, ignore_errors=True)

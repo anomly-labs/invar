@@ -26,8 +26,14 @@ trusts only pinned digests and the certificate math.
   explicit operator act (--host / HOST) documented to sit behind TLS. Bearer
   token on all Ledger routes. Request-size, entry-count, token-count, and
   prompt-length caps.
-- Injection: prompts reach llama.cpp as a single argv element (no shell). Ledger
-  device ids are regex-constrained (no path traversal).
+- Injection: prompts reach llama.cpp as a single argv element (no shell) and
+  Ollama as a JSON string field over HTTP. Ledger device ids are
+  regex-constrained (no path traversal).
+- Ollama model identity: three independent pins — manifest digest (weights +
+  template + params), GGUF blob digest, and the runtime binary digest. A
+  re-pulled tag with the same name is a different manifest digest → REJECT
+  ("deployment differs"). TESTED (unit suite against a stand-in server; the
+  integration suite against a real Ollama).
 
 ## Accepted risks — stated, not hidden
 - R1 Host compromise: an attacker with the box can regenerate a self-consistent
@@ -39,8 +45,26 @@ trusts only pinned digests and the certificate math.
 - R3 License sharing: possible by design; the free tier already includes all
   local features, so leakage exposes only Ledger team features (low stakes,
   documented in RESEARCH.md).
-- R4 llama.cpp determinism is deployment-pinned, not cross-machine — the profile
-  says so; the exact-quire profile is the cross-machine upgrade path.
+- R4 Determinism (llama.cpp and Ollama profiles alike) is deployment-pinned, not
+  cross-machine — the profile says so; the exact-quire profile is the
+  cross-machine upgrade path.
+- R7 Ollama backend, runtime pin strength: the receipt hashes the `ollama` binary
+  when it is on this filesystem. Against a remote Ollama, or when the binary is
+  not found, the pin degrades to the server's reported version string and the
+  receipt records `runtime_pinned_by: "version"` — a reader can tell the two
+  apart. A same-version binary swap is invisible to the version-only pin. Set
+  `INVAR_OLLAMA_BIN` (or `--binary`) to hash the binary explicitly.
+- R8 Ollama backend, device choice: Ollama decides at load time how many layers
+  run on a GPU; that choice is part of the deployment but not visible in the
+  API. Receipts written under one choice may stop reproducing under another
+  (GPU freed, driver change, laptop on battery). Pin `--num-gpu` when the box
+  is not static. The failure mode is an honest REJECT ("re-execution output
+  digest differs"), never a false ACCEPT.
+- R9 Ollama backend, shared server: INVAR serialises its own requests, but other
+  clients of the same Ollama (OLLAMA_NUM_PARALLEL > 1) can be batched with
+  them, which can change reduction order on some compute backends. Run a
+  receipted Ollama with OLLAMA_NUM_PARALLEL=1, or dedicate it. The agent trusts
+  the Ollama server it talks to exactly as it trusts its own host (R1).
 - R5 No TLS in-process: deliberate; deployment docs require a reverse proxy for
   any non-loopback exposure.
 - R6 Stripe webhook host holds the issuing key: key ceremony doc requires an

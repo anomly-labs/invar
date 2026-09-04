@@ -9,10 +9,23 @@ Uninstall is `rm -rf ~/.invar ~/.local/bin/invar`.
 ```
 curl -fsSL https://www.anomly.com/get/invar.sh | sh
 ```
-Requirements: Python 3.10+ and a llama.cpp `llama-cli` on your PATH (or set
-`INVAR_LLAMA_BIN`). No llama.cpp yet? `brew install llama.cpp` on macOS, or see
-https://github.com/ggml-org/llama.cpp/releases for prebuilt binaries.
-Prefer containers? `docker run` instructions are in the Dockerfile header.
+Requirements: Python 3.10+ and one inference engine: **Ollama** (already on
+your machine if you use it) or a llama.cpp `llama-cli` on your PATH (or set
+`INVAR_LLAMA_BIN`). No engine yet? https://ollama.com is the quickest;
+`brew install llama.cpp` on macOS or https://github.com/ggml-org/llama.cpp/releases
+for llama.cpp. Prefer containers? `docker run` instructions are in the Dockerfile header.
+
+## Already running Ollama? The whole thing is three commands
+```
+ollama pull llama3.2
+invar serve --model llama3.2        # not a file -> Ollama backend, auto-detected
+# ask anything through localhost:8577 (curl, Open WebUI, aider, the OpenAI SDK...)
+invar verify worldline.jsonl        # re-executes every entry against your Ollama
+```
+The receipt pins the `ollama` binary (sha256), the model manifest digest, the
+GGUF weights blob digest, and the decode params. Pin `--num-gpu 0` if a GPU can
+come and go on the box. Every client config is in [INTEGRATIONS.md](INTEGRATIONS.md).
+Steps 2–4 below are the llama.cpp path; the receipts are the same shape.
 
 ## 2. Get a model
 Any llama.cpp-compatible GGUF works. A small one to start: open
@@ -51,6 +64,6 @@ Every inference now lands, verified-at-the-door, in your fleet's custody log;
 
 ## What INVAR does not claim
 Receipts prove *this computation ran on these weights on this deployment* — they
-don't grade the answer, and the default profile pins reproducibility to your
-deployment (cross-machine bit-exactness is the separate exact-arithmetic
-profile). Full boundary: docs/THREATMODEL.md.
+don't grade the answer, and the default profiles (llama.cpp and Ollama alike)
+pin reproducibility to your deployment (cross-machine bit-exactness is the
+separate exact-arithmetic profile). Full boundary: docs/THREATMODEL.md.

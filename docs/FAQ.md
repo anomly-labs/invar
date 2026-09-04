@@ -2,10 +2,17 @@ Copyright (c) 2026 Anomly, Inc. All rights reserved. Author: Ry Bruscoe.
 
 # INVAR — FAQ
 
-**Is this another local-LLM runner?** The running is llama.cpp, credited plainly.
-What INVAR adds is the part nothing else has: a re-executable, hash-chained
-receipt for every inference, and a team plane that turns those into audit
-evidence.
+**Is this another local-LLM runner?** No. The running is Ollama or llama.cpp,
+credited plainly; keep whichever you already use. What INVAR adds is the part
+nothing else has: a re-executable, hash-chained receipt for every inference,
+and a team plane that turns those into audit evidence.
+
+**I already use Ollama. What changes?** Nothing about Ollama. `invar serve
+--model llama3.2` puts a receipted OpenAI-compatible endpoint in front of it;
+point Open WebUI, aider, Continue, or the OpenAI SDK at port 8577 instead of
+11434 and every answer is pinned to the `ollama` binary, the model manifest,
+the GGUF blob, and the decode params. `invar verify` asks Ollama to run each
+entry again and compares digests. Configs: docs/INTEGRATIONS.md.
 
 **Do I need an account or the internet?** No. The free agent has no account, no
 telemetry, no phone-home. Licenses verify offline. The only network calls are
