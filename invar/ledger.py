@@ -36,11 +36,19 @@ class _Server(ThreadingHTTPServer):
     request_queue_size = 64
 from urllib.parse import parse_qs, urlparse
 
+from .attest import AttestationBinding
 from .crcore import certificate_of, digest_bytes
+from .hwsign import verify_signature
 from .license import TRUSTED_KEYS, check
 
 GENESIS = "sha256:" + "0" * 64
 _DEV_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
+
+
+def _derived_genesis(host_attestation: dict) -> str:
+    b = AttestationBinding(host_attestation["kind"], nonce=host_attestation.get("nonce"))
+    b.evidence_digest = host_attestation.get("evidence_digest")
+    return b.genesis()
 
 
 class LedgerStore:
@@ -49,7 +57,10 @@ class LedgerStore:
     against the same tip and both append — a duplicated/forked chain in the
     custody log (found by an 8-thread race test, 2026-08-20; test in suite)."""
 
-    def __init__(self, root: str):
+    def __init__(self, root: str, trusted_key_ids: set | None = None):
+        # fleet-pinned device signing keys (LEDGER_TRUSTED_KEYS); None = accept any
+        # key that verifies, but a signature that is PRESENT must always verify
+        self.trusted_key_ids = trusted_key_ids
         self.root = root
         os.makedirs(root, exist_ok=True)
         self._master = threading.Lock()
@@ -79,11 +90,23 @@ class LedgerStore:
         if certificate_of(m) != entry.get("certificate"):
             return False, "certificate mismatch"
         if m.get("prev_chain") != prev:
-            return False, f"chain break (expected prev {prev[:18]}…)"
+            # a device's FIRST entry may start at an attestation-bound genesis: the
+            # binding is self-describing (evidence digest + nonce are certified in
+            # the manifest), so recompute it rather than trusting the claim
+            ha = m.get("computation", {}).get("host_attestation")
+            bound_ok = (prev == GENESIS and ha and ha.get("kind", "none") != "none"
+                        and _derived_genesis(ha) == m.get("prev_chain"))
+            if not bound_ok:
+                return False, f"chain break (expected prev {prev[:18]}…)"
+            prev = m["prev_chain"]              # the bound genesis is the real prev
         want = "sha256:" + hashlib.sha256(
             (prev + entry["certificate"]).encode()).hexdigest()
         if entry.get("chain") != want:
             return False, "chain digest wrong"
+        if entry.get("signature") is not None:
+            ok, why = verify_signature(entry, self.trusted_key_ids)
+            if not ok:
+                return False, f"signature: {why}"
         return True, "ok"
 
     def ingest(self, device: str, entries: list[dict]) -> dict:
@@ -204,7 +227,9 @@ def main():
         print("invar-ledger: set LEDGER_TOKEN (shared agent token)",
               file=sys.stderr)
         sys.exit(2)
-    store = LedgerStore(os.environ.get("LEDGER_DIR", "ledger-data"))
+    tk = os.environ.get("LEDGER_TRUSTED_KEYS", "").strip()
+    store = LedgerStore(os.environ.get("LEDGER_DIR", "ledger-data",
+                        trusted_key_ids={k.strip() for k in tk.split(",") if k.strip()} or None))
     collector = {"licensee": lic.email, "tier": lic.tier, "seats": lic.seats}
     host = os.environ.get("HOST", "127.0.0.1")   # expose deliberately, behind TLS
     port = int(os.environ.get("PORT", "8579"))

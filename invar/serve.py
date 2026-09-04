@@ -36,7 +36,9 @@ from collections import deque
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
+from .attest import AttestationBinding
 from .backends import LlamaCppBackend, make_backend
+from .hwsign import make_signer
 from .worldline import Worldline
 
 _lock = threading.Lock()
@@ -123,7 +125,11 @@ def make_handler(wl: Worldline, binary: str | None = None,
         def do_GET(self):
             if self.path == "/health":
                 self._json(200, {"ok": True, "model": model_name,
-                                 "profile": profile, "backend": backend.name})
+                                 "profile": profile, "backend": backend.name,
+                                 "signer": getattr(wl.signer, "backend", None),
+                                 "signer_key_id": getattr(wl.signer, "key_id", None),
+                                 "host_attestation": wl.host_attestation,
+                                 "genesis": wl.genesis})
             elif self.path in ("/v1/models", "/models"):
                 self._json(200, {"object": "list", "data": [{
                     "id": model_name, "object": "model",
@@ -238,17 +244,32 @@ def main():
     ap.add_argument("--host", default="127.0.0.1",
                     help="bind address (default loopback; expose deliberately)")
     ap.add_argument("--worldline", default="worldline.jsonl")
+    ap.add_argument("--signer", default=os.environ.get("INVAR_SIGNER"),
+                    help="sign every entry: software | tpm2 | tpm2:sha256:0,7 "
+                         "(PCR-policy-bound TPM key). Default: unsigned.")
+    ap.add_argument("--state-dir", default=os.environ.get("INVAR_STATE",
+                    os.path.expanduser("~/.invar")),
+                    help="where signing keys / TPM contexts live")
+    ap.add_argument("--attest", default=os.environ.get("INVAR_ATTEST"),
+                    help="attestation binding JSON (invar attest bind ...): genesis and "
+                         "every receipt commit to the platform evidence")
     a = ap.parse_args()
     backend = backend_from_args(a, a.model)
     dep = backend.deployment()          # fail fast: unreachable server / missing model
-    wl = Worldline(a.worldline)
+    os.makedirs(a.state_dir, mode=0o700, exist_ok=True)
+    signer = make_signer(a.signer, a.state_dir)
+    binding = AttestationBinding.load(a.attest) if a.attest else None
+    wl = Worldline(a.worldline, signer=signer, binding=binding)
     srv = _Server((a.host, a.port), make_handler(wl, backend=backend))
     pins = ", ".join(f"{k}={dep[k][:23]}…" if len(dep[k]) > 30 else f"{k}={dep[k]}"
                      for k in ("runtime_digest", "model_digest", "weights_digest")
                      if k in dep)
     print(f"receipted endpoint on {a.host}:{a.port}  backend={backend.name} "
           f"model={backend.model_name} profile={backend.profile} "
-          f"worldline={a.worldline}\n  pins: {pins}")
+          f"worldline={a.worldline}\n  pins: {pins}"
+          + (f"\n  signer: {signer.backend} key {signer.key_id}" if signer else "")
+          + (f"\n  attestation: {binding.kind} genesis {wl.genesis[:30]}…"
+             if binding else ""))
     srv.serve_forever()
 
 

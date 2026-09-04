@@ -22,6 +22,7 @@ import json
 import os
 import sys
 
+from .attest import AttestationBinding
 from .backends import (LLAMACPP_PROFILE, OLLAMA_PROFILE, LlamaCppBackend,
                        OllamaBackend)
 from .worldline import digest_bytes, verify_entries
@@ -65,7 +66,49 @@ def main():
                         "or http://127.0.0.1:11434)")
     v.add_argument("--no-reexecute", action="store_true",
                    help="structural + chain checks only")
+    v.add_argument("--attest", default=None,
+                   help="attestation binding JSON the chain must be bound to")
+    v.add_argument("--trust-key", action="append", default=None,
+                   help="accept only signatures from this key_id (repeatable)")
+    v.add_argument("--require-signature", action="store_true",
+                   help="unsigned entries REJECT")
+    at = sub.add_parser("attest", help="attestation bindings")
+    ats = at.add_subparsers(dest="acmd", required=True)
+    ab = ats.add_parser("bind", help="create a binding from platform evidence")
+    ab.add_argument("--kind", required=True,
+                    help="sev-snp-report | tdx-quote | nvidia-eta | tpm-quote | openpcc-bundle")
+    ab.add_argument("--evidence", required=True, help="evidence file (raw bytes)")
+    ab.add_argument("--verifier", default=None,
+                    help="who verified it (e.g. snpguest, nvtrust, veraison)")
+    ab.add_argument("--verdict", default=None, help="verifier's verdict/token file")
+    ab.add_argument("--out", default="attest-binding.json")
+    ap_ = ats.add_parser("collect-pcrs",
+                         help="snapshot the TPM SHA-256 PCR bank from sysfs (unsigned evidence)")
+    ap_.add_argument("--out", default="pcr-bank.json")
+    ap_.add_argument("--pcrs", default="0-7", help="range or list, e.g. 0-7 or 0,2,4,7")
     a = ap.parse_args()
+
+    if a.cmd == "attest" and a.acmd == "collect-pcrs":
+        from .attest import collect_pcr_bank
+        sel: list[int] = []
+        for part in a.pcrs.split(","):
+            if "-" in part:
+                lo, hi = part.split("-"); sel += list(range(int(lo), int(hi) + 1))
+            else:
+                sel.append(int(part))
+        doc = collect_pcr_bank(a.out, tuple(sel))
+        print(f"PCR bank written to {a.out} (UNSIGNED sysfs snapshot; a tpm2_quote is the signed form)")
+        for k, v in doc["pcrs"].items():
+            print(f"  PCR{k:>2} {v}")
+        return
+
+    if a.cmd == "attest":
+        b = AttestationBinding(a.kind, a.evidence, a.verifier, a.verdict)
+        b.save(a.out)
+        print(f"binding written to {a.out}\n  kind={b.kind}\n  evidence={b.evidence_digest}"
+              + (f"\n  verdict={b.verdict_digest} by {b.verifier}" if b.verdict_digest else "")
+              + f"\n  genesis={b.genesis()}\nserve with: invar serve --attest {a.out} ...")
+        return
 
     prompts: dict[str, str] = {}
     with open(a.worldline) as f:
@@ -96,7 +139,11 @@ def main():
         if not backends:
             reexec = False
 
-    results = verify_entries(a.worldline, prompts, backends, reexecute=reexec)
+    binding = AttestationBinding.load(a.attest) if a.attest else None
+    results = verify_entries(a.worldline, prompts, backends, reexecute=reexec,
+                             binding=binding,
+                             trusted_key_ids=set(a.trust_key) if a.trust_key else None,
+                             require_signature=a.require_signature)
     bad = 0
     for i, ok, why in results:
         print(f"entry {i}: {'ACCEPT' if ok else 'REJECT'} — {why}")

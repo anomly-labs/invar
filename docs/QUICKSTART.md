@@ -62,6 +62,16 @@ LEDGER_URL=https://ledger.yourco.com LEDGER_TOKEN=<shared-secret> \
 Every inference now lands, verified-at-the-door, in your fleet's custody log;
 `GET /v1/export?device=<id>` returns a certified chain-of-custody packet.
 
+## Bind the chain to your platform, sign with your TPM (optional)
+```
+invar attest collect-pcrs --out pcr-bank.json          # or snpguest / tdx / nvtrust evidence
+invar attest bind --kind tpm-pcr-bank --evidence pcr-bank.json --out binding.json
+invar serve --model llama3.2 --attest binding.json --signer tpm2:sha256:0,7
+invar verify worldline.jsonl --attest binding.json --require-signature
+```
+Genesis and every receipt now commit to the platform evidence, and every entry is
+signed by a key that lives in the TPM. Details and the honest boundary: [ATTESTATION.md](ATTESTATION.md).
+
 ## What INVAR does not claim
 Receipts prove *this computation ran on these weights on this deployment* — they
 don't grade the answer, and the default profiles (llama.cpp and Ollama alike)

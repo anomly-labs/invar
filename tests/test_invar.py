@@ -256,6 +256,7 @@ def main():
         print("\n[6] Ollama backend against a REAL server")
         if HAVE_OLLAMA:
             from invar.backends import OLLAMA_PROFILE, OllamaBackend
+            from invar.serve import make_handler as serve_handler
             from invar.worldline import verify_entries
             ob = OllamaBackend(OLLAMA_MODEL, host=OLLAMA_HOST,
                                num_gpu=OLLAMA_NUM_GPU)

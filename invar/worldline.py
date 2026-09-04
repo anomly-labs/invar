@@ -29,6 +29,8 @@ import time
 
 from .backends import (LLAMACPP_PROFILE, LlamaCppBackend, file_digest,  # noqa: F401
                        run_llamacpp)
+from .attest import NONE as ATTEST_NONE, AttestationBinding, check_binding  # noqa: F401
+from .hwsign import verify_signature
 from .crcore import canonical_bytes, certificate_of, digest_bytes  # noqa: F401
 # (vendored verbatim-equivalent from open-cr; the packaging smoke cross-checks
 # against the reference whenever OPEN_CR_PYTHON points at a checkout)
@@ -43,12 +45,16 @@ PIN_KEYS = ("runtime_digest", "model_digest", "weights_digest")
 
 
 def build_entry_for(backend, prompt: str, output: str, params: dict,
-                    prev_chain: str, deployment: dict | None = None) -> dict:
+                    prev_chain: str, deployment: dict | None = None,
+                    host_attestation: dict | None = None) -> dict:
     dep = deployment if deployment is not None else backend.deployment()
+    comp = {"kind": "llm-decode", **dep, "params": params}
+    if host_attestation and host_attestation.get("kind", "none") != "none":
+        comp["host_attestation"] = host_attestation   # certified: cannot be re-homed
     manifest = {
         "cr": "0.1",
         "profile": backend.profile,
-        "computation": {"kind": "llm-decode", **dep, "params": params},
+        "computation": comp,
         "inputs": {"prompt": digest_bytes(prompt.encode())},
         "outputs": {"text": digest_bytes(output.encode())},
         "prev_chain": prev_chain,
@@ -70,22 +76,38 @@ def build_entry(binary: str, model: str, prompt: str, output: str,
 
 
 class Worldline:
-    """Append-only hash-linked receipt log; one file per deployment."""
+    """Append-only hash-linked receipt log; one file per deployment.
+
+    `binding`  (invar.attest.AttestationBinding) — when given, genesis is derived
+               from the platform's attestation evidence and every manifest carries
+               `host_attestation`; the chain is then unusable under any other evidence.
+    `signer`   (invar.hwsign.*Signer) — when given, every appended entry gets a
+               `signature` block over its chain digest (TPM-resident key or software
+               key, stated in the block)."""
 
     GENESIS = "sha256:" + "0" * 64
 
-    def __init__(self, path: str):
+    def __init__(self, path: str, signer=None, binding=None):
         self.path = path
         self._lock = threading.Lock()
-        self.tip = self.GENESIS
+        self.signer = signer
+        self.binding = binding
+        self.genesis = binding.genesis() if binding else self.GENESIS
+        self.tip = self.genesis
         if os.path.exists(path):
             with open(path) as f:
                 for line in f:
                     self.tip = json.loads(line)["chain"]
 
+    @property
+    def host_attestation(self) -> dict:
+        return self.binding.manifest_field() if self.binding else dict(ATTEST_NONE)
+
     def append(self, entry: dict) -> None:
         with self._lock:
             assert entry["manifest"]["prev_chain"] == self.tip, "chain fork"
+            if self.signer is not None:
+                entry["signature"] = self.signer.sign(entry)
             with open(self.path, "a") as f:
                 f.write(json.dumps(entry, separators=(",", ":"),
                                    sort_keys=True) + "\n")
@@ -100,7 +122,7 @@ class Worldline:
         params = backend.params(n_predict, seed)
         output = backend.generate(prompt, params)
         entry = build_entry_for(backend, prompt, output, params, self.tip,
-                                deployment)
+                                deployment, self.host_attestation)
         # stored beside, NOT under, the certificate (texts are evidence carried
         # with the receipt; the digests inside the manifest are what is certified)
         entry["prompt_text"] = prompt
@@ -117,7 +139,9 @@ class Worldline:
 
 
 def verify_entries(path: str, prompts: dict[str, str], backends: dict,
-                   reexecute: bool = True) -> list:
+                   reexecute: bool = True, binding=None,
+                   trusted_key_ids: set[str] | None = None,
+                   require_signature: bool = False) -> list:
     """Verify every entry: certificate matches its canonical manifest, the chain
     links, and (if reexecute) the pinned computation reproduces the output digest.
     `prompts` maps prompt digest -> prompt text for re-execution.
@@ -125,7 +149,7 @@ def verify_entries(path: str, prompts: dict[str, str], backends: dict,
     builds one per model named in the receipts (a worldline may mix profiles and
     models; an entry whose profile has no backend gets structural checks only)."""
     results = []
-    prev = Worldline.GENESIS
+    prev = binding.genesis() if binding else Worldline.GENESIS
     live: dict[str, dict] = {}       # (profile, model) -> deployment(), once
     inst: dict[tuple, object] = {}   # factory results, keyed the same way
 
@@ -148,6 +172,11 @@ def verify_entries(path: str, prompts: dict[str, str], backends: dict,
             elif e["chain"] != "sha256:" + hashlib.sha256(
                     (prev + e["certificate"]).encode()).hexdigest():
                 ok, why = False, "chain digest wrong"
+            elif binding is not None and not check_binding(m, binding)[0]:
+                ok, why = False, check_binding(m, binding)[1]
+            elif (require_signature or e.get("signature")) and not (
+                    sig_ok := verify_signature(e, trusted_key_ids))[0]:
+                ok, why = False, sig_ok[1]
             elif reexecute:
                 pd = m["inputs"]["prompt"]
                 be = _backend(m.get("profile"), m["computation"])
@@ -173,6 +202,14 @@ def verify_entries(path: str, prompts: dict[str, str], backends: dict,
                             ok, why = False, "re-execution output digest differs"
                         else:
                             why = "re-executed, output digest matches"
+            if ok and binding is None and m.get("computation", {}).get(
+                    "host_attestation", {}).get("kind", "none") != "none":
+                why += ("; claims host attestation "
+                        f"{m['computation']['host_attestation']['kind']} (NOT checked: pass --attest)")
+            if ok and e.get("signature"):
+                why += "; " + verify_signature(e, trusted_key_ids)[1]
+            if ok and binding is not None:
+                why += "; " + check_binding(m, binding)[1]
             results.append((i, ok, why))
             prev = e["chain"]
     return results

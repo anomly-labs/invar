@@ -60,6 +60,21 @@ decode parameters. Verification re-asks Ollama and compares output digests;
 a re-pulled tag, a swapped binary, or a moved GPU layer split is a REJECT,
 never a silent pass.
 
+## Attested platform, hardware-signed receipts
+
+```
+invar attest bind --kind sev-snp-report --evidence report.bin --verifier snpguest --out binding.json
+invar serve --model llama3.2 --attest binding.json --signer tpm2:sha256:0,7
+invar verify worldline.jsonl --attest binding.json --require-signature
+```
+
+The chain's genesis is derived from your platform's attestation evidence (SEV-SNP,
+TDX, NVIDIA CC, a TPM quote, or the TPM PCR bank on any Linux box) and every receipt
+certifies it, so receipts cannot be re-homed to another machine. Every entry can be
+signed by a key that lives inside a TPM 2.0, optionally bound to a PCR policy so a
+modified boot cannot mint receipts. INVAR records the vendor verifier's verdict; it
+does not replace it. Boundary and setup: [docs/ATTESTATION.md](docs/ATTESTATION.md).
+
 ## What a receipt proves — and what it doesn't
 
 A receipt proves that **this runtime + these weights + this prompt + these

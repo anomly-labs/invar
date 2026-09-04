@@ -26,6 +26,12 @@ trusts only pinned digests and the certificate math.
   explicit operator act (--host / HOST) documented to sit behind TLS. Bearer
   token on all Ledger routes. Request-size, entry-count, token-count, and
   prompt-length caps.
+- Receipt re-homing: an attestation-bound chain certifies `host_attestation` inside
+  every manifest and derives genesis from the evidence digest; moving receipts to a
+  different platform's evidence breaks the certificate, and reading the chain without
+  the binding breaks at genesis. Ledger recomputes the bound genesis from the certified
+  field rather than trusting the claim, and verifies device signatures at the door
+  (LEDGER_TRUSTED_KEYS pins fleet keys). TESTED (unit: hwsign+attest, ledger door).
 - Injection: prompts reach llama.cpp as a single argv element (no shell) and
   Ollama as a JSON string field over HTTP. Ledger device ids are
   regex-constrained (no path traversal).
@@ -60,6 +66,17 @@ trusts only pinned digests and the certificate math.
   (GPU freed, driver change, laptop on battery). Pin `--num-gpu` when the box
   is not static. The failure mode is an honest REJECT ("re-execution output
   digest differs"), never a false ACCEPT.
+- R10 Attestation binding verifies nothing about the evidence itself: INVAR records
+  the digests of the evidence and of an external verifier's verdict (snpguest,
+  nvtrust/NRAS, Veraison...) and binds the chain to them. If the operator ran no
+  verifier, or a broken one, the binding is only a commitment to bytes. The
+  `verifier` field says who verified; "sysfs-unsigned" / kind "tpm-pcr-bank" means
+  unsigned measured-boot values, not a quote.
+- R11 Software signer (`--signer software`) proves possession of a key file on the
+  host, which R1 already assumes an attacker with the box could copy. It is labelled
+  `software-ed25519` in every signature block so a verifier never mistakes it for a
+  TPM key. The TPM signer's private half cannot leave the chip; with a PCR policy it
+  also cannot sign after the measured boot state changes. Neither hides prompts.
 - R9 Ollama backend, shared server: INVAR serialises its own requests, but other
   clients of the same Ollama (OLLAMA_NUM_PARALLEL > 1) can be batched with
   them, which can change reduction order on some compute backends. Run a

@@ -9,7 +9,7 @@ Crucially, the inference / parse / re-execution paths that test_invar.py SKIPs
 without a real model are covered HERE via tests/fake_llama.py — a llama.cpp
 stand-in that emits parseable, deterministic output. No GPU, no weights, no network.
 
-Sections: crcore · worldline(+parse+reexec) · license · ledger · serve · cli · ollama
+Sections: crcore · worldline(+parse+reexec) · license · ledger · serve · cli · ollama · hwsign+attest
 (the Ollama backend runs against tests/fake_ollama.py — a stand-in server — so its
 pin / generate / re-execution / drift paths are covered offline too)
 Run:  python3 tests/unit_tests.py     (or via tests/run_all.sh, which runs both)
@@ -55,6 +55,10 @@ from invar.backends import (OLLAMA_PROFILE, LLAMACPP_PROFILE, OllamaBackend,  # 
 from invar.worldline import verify_entries                                # noqa: E402
 sys.path.insert(0, HERE)
 from fake_ollama import FakeOllama                                        # noqa: E402
+from invar.attest import AttestationBinding, check_binding               # noqa: E402
+from invar.backends import LlamaCppBackend                                # noqa: E402
+from invar.hwsign import (SoftwareSigner, TPM2Signer, TPM2Error, make_signer,  # noqa: E402
+                          verify_signature)
 
 FAKE_SRC = open(os.path.join(HERE, "fake_llama.py")).read()
 
@@ -1022,6 +1026,177 @@ def sec_ollama(tmp, art):
     fo.stop()
 
 
+# ============================================================ hwsign + attest
+def sec_hwsign_attest(tmp, art):
+    print("\n== hwsign: software + TPM2 signatures; attest: genesis binding ==")
+    import base64
+    binA, model = art["binA"], art["model"]
+
+    # -- software signer: real Ed25519, key created 0600, reloads
+    kp = os.path.join(tmp, "sign.key")
+    s1 = SoftwareSigner(kp)
+    check("software signer creates key file 0600",
+          os.path.exists(kp) and stat.S_IMODE(os.stat(kp).st_mode) == 0o600)
+    s2 = SoftwareSigner(kp)
+    check("software signer reloads same key (same key_id)", s1.key_id == s2.key_id
+          and s1.key_id.startswith("sha256:"))
+    wl = Worldline(os.path.join(tmp, "signed_wl.jsonl"), signer=s1)
+    _, e = wl.infer_with_receipt(binA, model, "sign me", n_predict=8)
+    blk = e.get("signature", {})
+    check("signed entry carries signature block (backend/alg/key_id/sig/signed=chain)",
+          blk.get("backend") == "software-ed25519" and blk.get("alg") == "Ed25519"
+          and blk.get("key_id") == s1.key_id and blk.get("signed") == "chain")
+    check("signature verifies", verify_signature(e)[0])
+    check("signature is NOT inside the certified manifest",
+          "signature" not in e["manifest"] and certificate_of(e["manifest"]) == e["certificate"])
+    e_bad = json.loads(json.dumps(e)); e_bad["chain"] = "sha256:" + "1" * 64
+    check("signature over a different chain digest -> invalid", not verify_signature(e_bad)[0])
+    e_bad = json.loads(json.dumps(e))
+    e_bad["signature"]["sig"] = base64.b64encode(b"\x00" * 64).decode()
+    check("garbage sig -> invalid", verify_signature(e_bad)[1] == "signature invalid")
+    e_bad = json.loads(json.dumps(e)); e_bad["signature"]["key_id"] = "sha256:" + "f" * 64
+    check("key_id/pubkey mismatch -> reject", "key_id" in verify_signature(e_bad)[1])
+    check("untrusted key -> reject when a trust set is given",
+          not verify_signature(e, {"sha256:" + "a" * 64})[0]
+          and verify_signature(e, {s1.key_id})[0])
+    e_bad = json.loads(json.dumps(e)); del e_bad["signature"]
+    check("unsigned -> 'unsigned'", verify_signature(e_bad) == (False, "unsigned"))
+    # verify_entries honours signatures
+    wl.infer_with_receipt(binA, model, "and me", n_predict=8)
+    pr = {digest_bytes(b"sign me"): "sign me", digest_bytes(b"and me"): "and me"}
+    res = verify_entries(wl.path, pr, {LLAMACPP_PROFILE: LlamaCppBackend(binA, model)},
+                         trusted_key_ids={s1.key_id})
+    check("verify_entries: signed chain ACCEPT with signature note",
+          all(ok for _, ok, _ in res) and all("signature ok" in w for _, _, w in res))
+    res = verify_entries(wl.path, pr, {}, trusted_key_ids={"sha256:" + "b" * 64})
+    check("verify_entries: signer not in trust set -> REJECT",
+          not any(ok for _, ok, _ in res) and "not trusted" in res[0][2])
+    lines = open(wl.path).read().splitlines()
+    t = os.path.join(tmp, "sig_tamper.jsonl")
+    e0 = json.loads(lines[0]); e0["signature"]["sig"] = base64.b64encode(b"\x07" * 64).decode()
+    open(t, "w").write(json.dumps(e0, separators=(",", ":"), sort_keys=True) + "\n" + lines[1] + "\n")
+    res = verify_entries(t, pr, {})
+    check("verify_entries: tampered signature -> REJECT that entry only",
+          res[0][1] is False and res[1][1] is True)
+    unsigned = Worldline(os.path.join(tmp, "unsigned_wl.jsonl"))
+    unsigned.infer_with_receipt(binA, model, "plain", n_predict=4)
+    res = verify_entries(unsigned.path, {}, {}, require_signature=True)
+    check("verify_entries: --require-signature rejects unsigned", not res[0][1])
+    check("make_signer: None -> None, software -> SoftwareSigner, unknown -> ValueError",
+          make_signer(None, tmp) is None and isinstance(make_signer("software", tmp), SoftwareSigner)
+          and raises(ValueError, make_signer, "hsm", tmp))
+
+    # -- TPM2 signer: REAL TPM only (no simulator). Skips unless /dev/tpmrm0 is openable
+    #    and tpm2-tools are on PATH / INVAR_TPM2_BIN.
+    tpm_ok = os.access("/dev/tpmrm0", os.R_OK | os.W_OK)
+    tools = os.environ.get("INVAR_TPM2_BIN") or (os.path.dirname(subprocess.run(
+        ["which", "tpm2_sign"], capture_output=True, text=True).stdout.strip() or "/nonexistent"))
+    if tpm_ok and os.path.exists(os.path.join(tools, "tpm2_sign")):
+        ts = TPM2Signer(os.path.join(tmp, "tpm"), tools_bin=tools)
+        wlt = Worldline(os.path.join(tmp, "tpm_wl.jsonl"), signer=ts)
+        _, et = wlt.infer_with_receipt(binA, model, "tpm", n_predict=4)
+        check("TPM2 signer: ECDSA-P256 signature from a TPM-resident key verifies",
+              et["signature"]["backend"] == "tpm2-ecdsa-p256" and verify_signature(et)[0],
+              verify_signature(et)[1])
+        check("TPM2 signer: key.priv is TPM-wrapped (present) and no PEM private key exists",
+              os.path.exists(os.path.join(tmp, "tpm", "key.priv"))
+              and not any(n.endswith(".pem") and "priv" in n for n in os.listdir(os.path.join(tmp, "tpm"))))
+        tsp = TPM2Signer(os.path.join(tmp, "tpm_pcr"), pcrs="sha256:0,7", tools_bin=tools)
+        wlp = Worldline(os.path.join(tmp, "tpm_pcr_wl.jsonl"), signer=tsp)
+        _, ep = wlp.infer_with_receipt(binA, model, "pcr", n_predict=4)
+        check("TPM2 signer: PCR-policy-bound key signs under current PCR0,7 and verifies",
+              ep["signature"]["pcr_policy"] == "sha256:0,7" and verify_signature(ep)[0])
+    else:
+        print(f"  [SKIP] TPM2 signer (need rw on /dev/tpmrm0 [{'ok' if tpm_ok else 'denied'}] "
+              f"and tpm2-tools [{'ok' if os.path.exists(os.path.join(tools,'tpm2_sign')) else 'missing'}])")
+
+    # -- attestation binding: genesis + certified host_attestation field
+    ev = os.path.join(tmp, "evidence.bin")
+    open(ev, "wb").write(os.urandom(1184))           # bytes stand in for the evidence FILE;
+    vd = os.path.join(tmp, "verdict.json")           # the binding math is what is under test
+    open(vd, "w").write('{"verdict":"ACCEPT"}')
+    b = AttestationBinding("sev-snp-report", ev, verifier="snpguest", verdict_path=vd)
+    check("binding: genesis derived from evidence digest + nonce, not the zero genesis",
+          b.genesis() != Worldline.GENESIS and b.genesis().startswith("sha256:"))
+    b2 = AttestationBinding("sev-snp-report", ev, verifier="snpguest", verdict_path=vd, nonce=b.nonce)
+    check("binding: deterministic for same evidence + nonce", b.genesis() == b2.genesis())
+    ev2 = os.path.join(tmp, "evidence2.bin"); open(ev2, "wb").write(os.urandom(1184))
+    check("binding: different evidence -> different genesis",
+          AttestationBinding("sev-snp-report", ev2, nonce=b.nonce).genesis() != b.genesis())
+    bp = os.path.join(tmp, "binding.json"); b.save(bp)
+    bl = AttestationBinding.load(bp)
+    check("binding: save/load round-trips genesis + field", bl.genesis() == b.genesis()
+          and bl.manifest_field() == b.manifest_field())
+    wlb = Worldline(os.path.join(tmp, "bound_wl.jsonl"), binding=b, signer=s1)
+    check("bound worldline starts at the bound genesis", wlb.tip == b.genesis())
+    _, eb = wlb.infer_with_receipt(binA, model, "bound", n_predict=4)
+    ha = eb["manifest"]["computation"].get("host_attestation", {})
+    check("bound entry: host_attestation certified inside the manifest",
+          ha.get("kind") == "sev-snp-report" and ha.get("evidence_digest") == b.evidence_digest
+          and ha.get("verifier") == "snpguest" and eb["manifest"]["prev_chain"] == b.genesis()
+          and certificate_of(eb["manifest"]) == eb["certificate"])
+    prb = {digest_bytes(b"bound"): "bound"}
+    res = verify_entries(wlb.path, prb, {}, binding=b)
+    check("verify with the right binding: ACCEPT + bound note",
+          res[0][1] and "host attestation bound" in res[0][2])
+    res = verify_entries(wlb.path, prb, {})
+    check("verify WITHOUT the binding: chain broken at genesis (cannot be read as unbound)",
+          not res[0][1] and res[0][2] == "chain broken")
+    other = AttestationBinding("sev-snp-report", ev2, nonce=b.nonce)
+    res = verify_entries(wlb.path, prb, {}, binding=other)
+    check("verify with a different platform's evidence: REJECT", not res[0][1])
+    tb = os.path.join(tmp, "rehome.jsonl")
+    e_re = json.loads(open(wlb.path).readline())
+    e_re["manifest"]["computation"]["host_attestation"]["evidence_digest"] = other.evidence_digest
+    open(tb, "w").write(json.dumps(e_re, separators=(",", ":"), sort_keys=True) + "\n")
+    res = verify_entries(tb, prb, {}, binding=other)
+    check("re-homing the host_attestation field breaks the certificate",
+          not res[0][1] and res[0][2] == "certificate mismatch")
+    check("unbound worldline verified against a binding -> REJECT (no attestation claimed)",
+          not verify_entries(unsigned.path, {}, {}, binding=b)[0][1])
+    check("check_binding: none vs none is fine",
+          check_binding({"computation": {}}, AttestationBinding.none())[0])
+    # -- Ledger at the door: bound genesis accepted, bad signature 422, untrusted key 422
+    from invar.ledger import LedgerStore
+    st = LedgerStore(os.path.join(tmp, "ledger_hw"))
+    bound_entries = [json.loads(x) for x in open(wlb.path).read().splitlines()]
+    r = st.ingest("dev-bound", bound_entries)
+    check("ledger: first entry at an attestation-bound genesis ACCEPTED (genesis recomputed)",
+          "rejected_at" not in r, json.dumps(r)[:120])
+    ex = st.export("dev-bound", {"collector": "unit"})
+    check("ledger: export of a bound device re-verifies every entry ok",
+          ex["packet"]["entry_count"] == len(bound_entries)
+          and all(x["ok"] for x in ex["packet"]["verification"]))
+    st2 = LedgerStore(os.path.join(tmp, "ledger_hw2"))
+    e_re2 = json.loads(json.dumps(bound_entries[0]))
+    e_re2["manifest"]["prev_chain"] = "sha256:" + "5" * 64   # arbitrary genesis claim
+    r = st2.ingest("dev-x", [e_re2])
+    check("ledger: arbitrary genesis claim (does not derive from the certified binding) REJECTED",
+          "rejected_at" in r)
+    st3 = LedgerStore(os.path.join(tmp, "ledger_hw3"))
+    sig_entries = [json.loads(x) for x in open(wl.path).read().splitlines()]
+    bad = json.loads(json.dumps(sig_entries[0]))
+    bad["signature"]["sig"] = base64.b64encode(b"\x09" * 64).decode()
+    r = st3.ingest("dev-sig", [bad])
+    check("ledger: entry with an invalid signature REJECTED at the door",
+          "rejected_at" in r and "signature" in json.dumps(r))
+    st4 = LedgerStore(os.path.join(tmp, "ledger_hw4"), trusted_key_ids={"sha256:" + "c" * 64})
+    r = st4.ingest("dev-sig", sig_entries)
+    check("ledger: valid signature from a key outside LEDGER_TRUSTED_KEYS REJECTED",
+          "rejected_at" in r and "not trusted" in json.dumps(r))
+    st5 = LedgerStore(os.path.join(tmp, "ledger_hw5"), trusted_key_ids={s1.key_id})
+    r = st5.ingest("dev-sig", sig_entries)
+    check("ledger: signed entries from a trusted key ACCEPTED", "rejected_at" not in r)
+    wlb.infer_with_receipt(binA, model, "bound two", n_predict=4)
+    res = verify_entries(wlb.path, prb, {})
+    check("verify unbound: entry 0 chain broken, entry 1 notes the unchecked attestation claim",
+          not res[0][1] and res[1][1] and "NOT checked" in res[1][2], res[1][2][:80])
+
+    check("AttestationBinding.none genesis == classic genesis",
+          AttestationBinding.none().genesis() == Worldline.GENESIS
+          and AttestationBinding.none().manifest_field() == {"kind": "none"})
+
+
 def main():
     tmp = tempfile.mkdtemp(prefix="invar-unit-")
     try:
@@ -1034,6 +1209,7 @@ def main():
         sec_edges(tmp, art, lic)
         sec_webhook(tmp, lic)
         sec_ollama(tmp, art)
+        sec_hwsign_attest(tmp, art)
     finally:
         import shutil
         shutil.rmtree(tmp, ignore_errors=True)
