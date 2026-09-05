@@ -155,8 +155,12 @@ which the dump now records as `Qcur_bias` rows) is byte-identical across the two
 at 14 tok/s exact; the Go reference reproduces all 1,935 rows of its dump in 25 s and the
 elementwise verifier re-executes the bias additions; on the RTX 5090 (in the memory left
 beside another workload) its first three evaluations are byte-identical to the CPU, so the
-CUDA NEOX RoPE and bias path is covered too. Three model families so far: SmolLM2, Llama 3
-and Qwen2.5.
+CUDA NEOX RoPE and bias path is covered too. **Gemma-3-270M-it** brings a scaled embedding,
+per-head QK-norms, post-attention and post-FFN norms, GEGLU (a deterministic tanh-GELU now
+replaces ggml's table-based one on both backends), per-layer RoPE bases with sliding-window
+layers, and a prompt that llama.cpp feeds in chunks: byte-identical across the two binaries at
+25 tok/s exact, Go reference 2,267/2,267 rows in 6 s, Python 2,260/2,260. Four model families:
+SmolLM2, Llama 3, Qwen2.5 and Gemma 3.
 
 So the exact profile is no longer defined by a binary; EXACT-PROFILE-SPEC.md writes it down
 as a specification a fourth implementation can be built from. Two independent implementations,

@@ -170,8 +170,14 @@ class LlamaReexec:
         self.n_embd = int(kv[f"{arch}.embedding_length"])
         self.n_head = int(kv[f"{arch}.attention.head_count"])
         self.n_head_kv = int(kv.get(f"{arch}.attention.head_count_kv", self.n_head))
-        self.head_dim = self.n_embd // self.n_head
+        self.head_dim = int(kv.get(f"{arch}.attention.key_length", self.n_embd // self.n_head))
         self.n_dims = int(kv.get(f"{arch}.rope.dimension_count", self.head_dim))
+        self.gemma = arch.startswith("gemma")
+        # gemma3: sliding-window layers (pattern period 6) use their own rope base; every 6th layer is global
+        self.n_swa = int(kv.get(f"{arch}.attention.sliding_window", 0))
+        self.swa_period = int(kv.get(f"{arch}.attention.sliding_window_pattern", 6))
+        self.freq_base_swa = float(kv.get(f"{arch}.rope.freq_base_swa", kv.get(f"{arch}.rope.freq_base", 10000.0)))
+        self.attn_scale = dm.f32(1.0 / math.sqrt(float(self.head_dim)))   # gemma3 f_attention_scale (Q is pre-scaled)
         self.eps = float(kv.get(f"{arch}.attention.layer_norm_rms_epsilon", 1e-5))
         self.freq_base = float(kv.get(f"{arch}.rope.freq_base", 10000.0))
         self.freq_scale = 1.0 / float(kv.get(f"{arch}.rope.scaling.factor", 1.0))
@@ -215,10 +221,30 @@ class LlamaReexec:
         return np.stack([np.array(dm.add_row(r.tolist(), b.tolist()), dtype=np.float32) for r in rows])
 
     def embed(self, tok: int) -> np.ndarray:
-        """dequantize_row_bposit8 of the token's row: (float)(value * 2^se)."""
+        """dequantize_row_bposit8 of the token's row: (float)(value * 2^se); gemma scales by sqrtf(n_embd)."""
         m = self.tok_embd
         vals = m.M[tok].astype(np.float64) * np.exp2(m.E[tok].astype(np.float64) + m.se[tok][:, None].astype(np.float64))
-        return vals.reshape(-1).astype(np.float32)
+        row = vals.reshape(-1).astype(np.float32)
+        if self.gemma:
+            sc = dm.f32(math.sqrt(float(self.n_embd)))
+            row = np.array([dm.fmul(float(v), sc) for v in row], dtype=np.float32)
+        return row
+
+    def is_swa(self, il: int) -> bool:
+        return self.n_swa > 0 and ((il + 1) % self.swa_period) != 0
+
+    def layer_freq_base(self, il: int) -> float:
+        return self.freq_base_swa if self.is_swa(il) else self.freq_base
+
+    def has(self, name: str) -> bool:
+        return name in self.g.tensors
+
+    def norm_heads(self, row: np.ndarray, w, nh: int) -> np.ndarray:
+        out = np.empty_like(row)
+        for h in range(nh):
+            sl = slice(h * self.head_dim, (h + 1) * self.head_dim)
+            out[sl] = dm.rms_norm_row(row[sl].tolist(), w, self.eps)
+        return out
 
     def forward(self, tokens: list[int], trace: dict | None = None) -> np.ndarray:
         """Process `tokens` at positions n_past.. ; returns the logits of the last token as
@@ -227,6 +253,8 @@ class LlamaReexec:
         pos0 = self.n_past
         T = len(tokens)
         x = np.stack([self.embed(t) for t in tokens])                     # [T, n_embd] float32
+        if trace is not None:
+            trace["inp_scaled" if self.gemma else "inp_embd"] = x[-1]
         for il in range(self.n_layer):
             pfx = f"blk.{il}."
             wn = self.norm_w(pfx + "attn_norm.weight")
@@ -241,18 +269,27 @@ class LlamaReexec:
                 q, k, v = self.add_bias(q, bq), self.add_bias(k, bk), self.add_bias(v, bv)
                 if trace is not None:
                     trace[il].update(Qcur_bias=q[-1], Kcur_bias=k[-1], Vcur_bias=v[-1])
+            if self.has(pfx + "attn_q_norm.weight"):                      # gemma3 QK-norm (per head)
+                wq, wk = self.norm_w(pfx + "attn_q_norm.weight"), self.norm_w(pfx + "attn_k_norm.weight")
+                q = np.stack([self.norm_heads(q[t], wq, self.n_head) for t in range(T)])
+                k = np.stack([self.norm_heads(k[t], wk, self.n_head_kv) for t in range(T)])
+                if trace is not None:
+                    trace[il].update(Qcur_normed=q[-1], Kcur_normed=k[-1])
+            fb = self.layer_freq_base(il)
             qr = np.empty_like(q)
             kr = np.empty_like(k)
             for t in range(T):
                 pos = pos0 + t
                 for h in range(self.n_head):
                     sl = slice(h * self.head_dim, (h + 1) * self.head_dim)
-                    qr[t, sl] = dm.rope_row(q[t, sl].tolist(), pos, self.n_dims, self.freq_base, self.freq_scale, 1.0, self.neox, self.freq_factors)
+                    qr[t, sl] = dm.rope_row(q[t, sl].tolist(), pos, self.n_dims, fb, self.freq_scale, 1.0, self.neox, self.freq_factors)
                 for h in range(self.n_head_kv):
                     sl = slice(h * self.head_dim, (h + 1) * self.head_dim)
-                    kr[t, sl] = dm.rope_row(k[t, sl].tolist(), pos, self.n_dims, self.freq_base, self.freq_scale, 1.0, self.neox, self.freq_factors)
+                    kr[t, sl] = dm.rope_row(k[t, sl].tolist(), pos, self.n_dims, fb, self.freq_scale, 1.0, self.neox, self.freq_factors)
             if trace is not None:
                 trace[il].update(Qcur_rope=qr[-1], Kcur_rope=kr[-1])
+            if self.gemma:                                                 # Q pre-scaled, attention scale 1
+                qr = np.stack([np.array([dm.fmul(float(v), self.attn_scale) for v in qr[t]], dtype=np.float32) for t in range(T)])
             # KV cache in f16 (round-to-nearest)
             for t in range(T):
                 self.k_cache[il].append(f16_bits_array(kr[t]).reshape(self.n_head_kv, self.head_dim))
@@ -261,7 +298,7 @@ class LlamaReexec:
             Vc = np.stack(self.v_cache[il])
             n_kv = Kc.shape[0]
             gqa = self.n_head // self.n_head_kv
-            kqv_out = np.empty((T, self.n_embd), dtype=np.float32)
+            kqv_out = np.empty((T, self.n_head * self.head_dim), dtype=np.float32)
             for t in range(T):
                 pos = pos0 + t
                 for h in range(self.n_head):
@@ -269,22 +306,44 @@ class LlamaReexec:
                     sl = slice(h * self.head_dim, (h + 1) * self.head_dim)
                     qh = f16_bits_array(qr[t, sl])                         # the f16 operand of the KQ matmul
                     kq = f16_matmul_rows(Kc[:, hk, :], qh)                 # [n_kv] float32
-                    mask = [0.0 if j <= pos else float("-inf") for j in range(n_kv)]
-                    p = dm.soft_max_row(kq.tolist(), self.kq_scale, mask)  # [n_kv]
+                    if self.is_swa(il):
+                        mask = [0.0 if (j <= pos and pos - j < self.n_swa) else float("-inf") for j in range(n_kv)]
+                    else:
+                        mask = [0.0 if j <= pos else float("-inf") for j in range(n_kv)]
+                    p = dm.soft_max_row(kq.tolist(), 1.0 if self.gemma else self.kq_scale, mask)  # [n_kv]
                     ph = f16_bits_array(np.array(p, dtype=np.float32))
                     kqv_out[t, sl] = f16_matmul_rows(Vc[:, hk, :].T.copy(), ph)   # V^T [head_dim, n_kv] . p
             attn_out = np.stack([self.w(pfx + "attn_output.weight").dot(kqv_out[t]) for t in range(T)])
-            ffn_inp = np.stack([np.array(dm.add_row(x[t].tolist(), attn_out[t].tolist()), dtype=np.float32) for t in range(T)])
+            extra = {}
+            if self.has(pfx + "post_attention_norm.weight"):               # gemma3 post-attention norm
+                wpa = self.norm_w(pfx + "post_attention_norm.weight")
+                attn_post = np.stack([np.array(dm.rms_norm_row(attn_out[t].tolist(), wpa, self.eps), dtype=np.float32) for t in range(T)])
+                extra["attn_post_norm"] = attn_post[-1]
+                ffn_inp = np.stack([np.array(dm.add_row(attn_post[t].tolist(), x[t].tolist()), dtype=np.float32) for t in range(T)])
+                extra["sa_out"] = ffn_inp[-1]
+            else:
+                ffn_inp = np.stack([np.array(dm.add_row(x[t].tolist(), attn_out[t].tolist()), dtype=np.float32) for t in range(T)])
             wn2 = self.norm_w(pfx + "ffn_norm.weight")
             cur2 = np.stack([np.array(dm.rms_norm_row(ffn_inp[t].tolist(), wn2, self.eps), dtype=np.float32) for t in range(T)])
             gate = np.stack([self.w(pfx + "ffn_gate.weight").dot(cur2[t]) for t in range(T)])
             up = np.stack([self.w(pfx + "ffn_up.weight").dot(cur2[t]) for t in range(T)])
-            sw = np.stack([np.array(dm.swiglu_row(gate[t].tolist(), up[t].tolist()), dtype=np.float32) for t in range(T)])
+            if self.gemma:
+                sw = np.stack([np.array(dm.geglu_row(gate[t].tolist(), up[t].tolist()), dtype=np.float32) for t in range(T)])
+                glu_name = "ffn_geglu"
+            else:
+                sw = np.stack([np.array(dm.swiglu_row(gate[t].tolist(), up[t].tolist()), dtype=np.float32) for t in range(T)])
+                glu_name = "ffn_swiglu"
             down = np.stack([self.w(pfx + "ffn_down.weight").dot(sw[t]) for t in range(T)])
-            x = np.stack([np.array(dm.add_row(down[t].tolist(), ffn_inp[t].tolist()), dtype=np.float32) for t in range(T)])
+            if self.has(pfx + "post_ffw_norm.weight"):                     # gemma3 post-FFN norm
+                wpf = self.norm_w(pfx + "post_ffw_norm.weight")
+                ffn_post = np.stack([np.array(dm.rms_norm_row(down[t].tolist(), wpf, self.eps), dtype=np.float32) for t in range(T)])
+                extra["ffn_post_norm"] = ffn_post[-1]
+                x = np.stack([np.array(dm.add_row(ffn_post[t].tolist(), ffn_inp[t].tolist()), dtype=np.float32) for t in range(T)])
+            else:
+                x = np.stack([np.array(dm.add_row(down[t].tolist(), ffn_inp[t].tolist()), dtype=np.float32) for t in range(T)])
             if trace is not None:
                 trace[il].update(kqv_out=kqv_out[-1], attn_out=attn_out[-1], ffn_norm=cur2[-1], ffn_gate=gate[-1],
-                                 ffn_up=up[-1], ffn_swiglu=sw[-1], ffn_out=down[-1], l_out=x[-1])
+                                 ffn_up=up[-1], ffn_out=down[-1], l_out=x[-1], **{glu_name: sw[-1]}, **extra)
         self.n_past += T
         hidden = np.array(dm.rms_norm_row(x[-1].tolist(), self.norm_w("output_norm.weight"), self.eps), dtype=np.float32)
         logits = self.w(self.out_name).dot(hidden) if self.out_name != "token_embd.weight" else self.tok_embd.dot(hidden)
@@ -320,12 +379,23 @@ def read_dump_evals(path: str) -> list[dict]:
                 cur = {"layers": {}, "tokens": None}
             elif name in ("inp_embd", "embd"):
                 cur["inp_embd"] = vals
+            elif name == "inp_scaled":
+                cur["inp_scaled"] = vals
             elif "-" in name:
                 base, _, il = name.rpartition("-")
                 if il.isdigit():
                     lay = cur["layers"].setdefault(int(il), {})
                     lay.setdefault(base, vals)
+                    if "pos" in d and "pos_last" not in cur:
+                        cur["pos_last"] = int(d["pos"])
     return evals
+
+
+def eval_first_pos(ev: dict) -> int | None:
+    """Position of the evaluation's first token (None when the dump carries no positions)."""
+    if "pos_last" not in ev or ev["tokens"] is None:
+        return None
+    return ev["pos_last"] - (len(ev["tokens"]) - 1)
 
 
 def compare_rows(a: np.ndarray, b: np.ndarray) -> int:
@@ -363,8 +433,10 @@ def reexec_dump(gguf_path: str, dump_path: str, max_evals: int = 0,
     last_logits = None
     for ei, ev in enumerate(evals):
         trace: dict = {}
-        if len(ev["tokens"]) > 1:
+        fp = eval_first_pos(ev)
+        if (fp == 0) if fp is not None else (len(ev["tokens"]) > 1):
             model.reset()
+        if len(ev["tokens"]) > 1:
             seen_prompt = True
             generated = []
         elif seen_prompt:
@@ -378,6 +450,8 @@ def reexec_dump(gguf_path: str, dump_path: str, max_evals: int = 0,
                     if nd and not first_bad:
                         first_bad = f"eval {ei} layer {il} {name}"
         for name, key in (("hidden", "result_norm"), ("logits", "result_output")):
+            if name not in ev or ev[name].size == 0:
+                continue
             nd = compare_rows(trace[key], ev[name])
             total += 1; bad += (nd > 0)
             if nd and not first_bad:
@@ -421,8 +495,9 @@ def main(argv=None) -> int:
     for ei, ev in enumerate(evals):
         trace: dict = {}
         te = time.time()
-        if len(ev["tokens"]) > 1:
-            model.reset()          # a multi-token evaluation is a (re)start of the sequence (prompt, warm-up, probe)
+        fp = eval_first_pos(ev)
+        if (fp == 0) if fp is not None else (len(ev["tokens"]) > 1):
+            model.reset()          # position 0 (re)starts the sequence: prompt chunk, warm-up, probe
         logits = model.forward(ev["tokens"], trace)
         for il, lay in ev["layers"].items():
             for name, row in lay.items():
@@ -435,6 +510,8 @@ def main(argv=None) -> int:
                         first_bad = f"eval {ei} layer {il} {name}: {nd}/{row.size} floats differ"
         for name in ("hidden", "logits"):
             key = "result_norm" if name == "hidden" else "result_output"
+            if name not in ev or ev[name].size == 0:
+                continue                       # a prompt chunk without logits
             nd = compare_rows(trace[key], ev[name])
             k = kinds.setdefault(key, [0, 0])
             k[0] += 1; k[1] += (nd > 0)
@@ -443,6 +520,8 @@ def main(argv=None) -> int:
                 first_bad = f"eval {ei} {key}: {nd}/{ev[name].size} floats differ"
         nxt = evals[ei + 1]["tokens"] if ei + 1 < len(evals) else None
         argmax = int(np.argmax(logits))
+        if "logits" not in ev or ev["logits"].size == 0:
+            nxt = None                         # no logits were served for this chunk
         tok_note = ""
         if nxt is not None and len(nxt) == 1:
             tok_note = f", argmax {argmax} == next token {nxt[0]}" if argmax == nxt[0] else f", argmax {argmax} != next token {nxt[0]}"

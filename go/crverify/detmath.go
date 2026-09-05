@@ -300,6 +300,43 @@ func RopeSincosFF(pos float32, i, nDims int, freqBase, freqScale, ff float32) (s
 	return float32(sd), float32(cd)
 }
 
+func DetTanhD(y float64) float64 {
+	if y > 20.0 {
+		return 1.0
+	}
+	if y < -20.0 {
+		return -1.0
+	}
+	u := DetExpD(dmul(2.0, y))
+	return ddiv(dsub(u, 1.0), dadd(u, 1.0))
+}
+
+func DetTanhf(x float32) float32 {
+	if x != x {
+		return x
+	}
+	return float32(DetTanhD(float64(x)))
+}
+
+const (
+	detGeluCoefA   = float32(0.044715)
+	detSqrt2OverPi = float32(0.79788456080286535587989211986876)
+)
+
+// Geluf: ggml's tanh-GELU with its operation order
+func Geluf(x float32) float32 {
+	inner := fmul(detSqrt2OverPi, fmul(x, fadd(1, fmul(detGeluCoefA, fmul(x, x)))))
+	return fmul(fmul(0.5, x), fadd(1, DetTanhf(inner)))
+}
+
+func GegluRow(gate, up []float32) []float32 {
+	out := make([]float32, len(gate))
+	for i := range gate {
+		out[i] = fmul(Geluf(gate[i]), up[i])
+	}
+	return out
+}
+
 func Sigmoidf(x float32) float32 { return fdiv(1, fadd(1, DetExpf(-x))) }
 func Siluf(x float32) float32    { return fmul(x, Sigmoidf(x)) }
 

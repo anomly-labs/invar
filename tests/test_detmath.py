@@ -38,6 +38,7 @@ int main(int argc, char ** argv) {
         else if (!strcmp(op, "exp2")) { fscanf(f, "%lf", &a); printf("%016llx\n", db(det_exp2_d(a))); }
         else if (!strcmp(op, "rope")) { fscanf(f, "%lf %lf %lf %lf", &a, &b, &c, &(double){0}); int i = (int) b; int nd; fscanf(f, "%d", &nd); float s, cc; det_rope_sincos((float) a, i, nd, (float) c, 1.0f, &s, &cc); printf("%08x %08x\n", fb(s), fb(cc)); }
         else if (!strcmp(op, "ropeff")) { double ff; int i, nd; fscanf(f, "%lf %d %d %lf %lf", &a, &i, &nd, &c, &ff); float s, cc; det_rope_sincos_ff((float) a, i, nd, (float) c, 1.0f, (float) ff, &s, &cc); printf("%08x %08x\n", fb(s), fb(cc)); }
+        else if (!strcmp(op, "gelu")) { fscanf(f, "%lf", &a); printf("%08x\n", fb(det_geluf((float) a))); }
         else if (!strcmp(op, "rms")) { fscanf(f, "%d", &n); float * x = malloc(n * sizeof(float)); for (int i = 0; i < n; i++) { fscanf(f, "%lf", &a); x[i] = (float) a; } fscanf(f, "%lf", &b);
             double S = det_sumsq_f32(x, n); printf("%016llx %08x\n", db(S), fb(det_rms_scale(S, n, (float) b))); free(x); }
         else if (!strcmp(op, "softmax")) { fscanf(f, "%d", &n); float * x = malloc(n * sizeof(float)); float * y = malloc(n * sizeof(float)); float mx = -INFINITY;
@@ -79,6 +80,9 @@ def main() -> int:
         pos, i, nd, fbse = rnd.randint(0, 8192), rnd.randint(0, 63), rnd.choice([32, 64, 128]), rnd.choice([10000.0, 500000.0, 1000000.0])
         i = i % (nd // 2)
         cases.append(f"rope {pos} {i} {fbse!r} 0 {nd}"); expect.append(("ff", dm.rope_sincos(pos, i, nd, fbse, 1.0)))
+    for _ in range(3000):
+        x = rf(-12, 12)
+        cases.append(f"gelu {x!r}"); expect.append(("f", dm.geluf(x)))
     for _ in range(2000):
         pos, nd, fbse = rnd.randint(0, 8192), 64, 500000.0
         i = rnd.randint(0, nd // 2 - 1)

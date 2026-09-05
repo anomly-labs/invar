@@ -291,6 +291,9 @@ type Reexec struct {
 	norms                               map[string][]float32
 	kCache, vCache                      [][][]uint16 // [layer][pos][nHeadKV*hDim]
 	freqFactors                         []float32    // rope_freqs.weight (Llama 3), nil otherwise
+	gemma                               bool
+	nSWA, swaPeriod                     int
+	freqBaseSWA, attnScale              float32
 	nPast                               int
 	outName                             string
 }
@@ -326,8 +329,13 @@ func NewReexec(g *GGUF) (*Reexec, error) {
 	if m.nLayer == 0 || m.nEmbd == 0 {
 		return nil, errors.New("not a llama-family GGUF (block_count / embedding_length missing)")
 	}
-	m.hDim = m.nEmbd / m.nHead
+	m.hDim = int(kvFloat(g.KV, arch+".attention.key_length", float64(m.nEmbd/m.nHead)))
 	m.nDims = int(kvFloat(g.KV, arch+".rope.dimension_count", float64(m.hDim)))
+	m.gemma = strings.HasPrefix(arch, "gemma")
+	m.nSWA = int(kvFloat(g.KV, arch+".attention.sliding_window", 0))
+	m.swaPeriod = int(kvFloat(g.KV, arch+".attention.sliding_window_pattern", 6))
+	m.freqBaseSWA = float32(kvFloat(g.KV, arch+".rope.freq_base_swa", kvFloat(g.KV, arch+".rope.freq_base", 10000)))
+	m.attnScale = float32(1.0 / math.Sqrt(float64(m.hDim)))
 	m.eps = float32(kvFloat(g.KV, arch+".attention.layer_norm_rms_epsilon", 1e-5))
 	m.freqBase = float32(kvFloat(g.KV, arch+".rope.freq_base", 10000))
 	m.freqScale = float32(1.0 / kvFloat(g.KV, arch+".rope.scaling.factor", 1))
@@ -391,6 +399,26 @@ func (m *Reexec) mm(name string, x []float32) ([]float32, error) {
 	return w.dot(xq), nil
 }
 
+func (m *Reexec) isSWA(il int) bool { return m.nSWA > 0 && (il+1)%m.swaPeriod != 0 }
+
+func (m *Reexec) has(name string) bool { _, ok := m.g.Tensors[name]; return ok }
+
+func (m *Reexec) normHeads(row []float32, w []float32, nh int) []float32 {
+	out := make([]float32, len(row))
+	for h := 0; h < nh; h++ {
+		copy(out[h*m.hDim:(h+1)*m.hDim], RmsNormRow(row[h*m.hDim:(h+1)*m.hDim], w, m.eps))
+	}
+	return out
+}
+
+func scaleRow(x []float32, s float32) []float32 {
+	out := make([]float32, len(x))
+	for i := range x {
+		out[i] = fmul(x[i], s)
+	}
+	return out
+}
+
 // optional projection bias (Qwen2 style)
 func (m *Reexec) biasOpt(name string) []float32 {
 	if _, ok := m.g.Tensors[name]; !ok {
@@ -422,9 +450,16 @@ func (m *Reexec) Forward(tokens []int, trace map[string][]float32) ([]float32, e
 	x := make([][]float32, T)
 	for t := range tokens {
 		x[t] = emb.row(tokens[t])
+		if m.gemma {
+			x[t] = scaleRow(x[t], float32(math.Sqrt(float64(m.nEmbd))))
+		}
 	}
 	if trace != nil {
-		trace["inp_embd"] = x[T-1]
+		if m.gemma {
+			trace["inp_scaled"] = x[T-1]
+		} else {
+			trace["inp_embd"] = x[T-1]
+		}
 	}
 	gqa := m.nHead / m.nHeadKV
 	for il := 0; il < m.nLayer; il++ {
@@ -466,38 +501,70 @@ func (m *Reexec) Forward(tokens []int, trace map[string][]float32) ([]float32, e
 				}
 			}
 		}
+		var qn, kn [][]float32
+		if m.has(pfx + "attn_q_norm.weight") { // gemma3 QK-norm per head
+			wq, err := m.norm(pfx + "attn_q_norm.weight")
+			if err != nil {
+				return nil, err
+			}
+			wk, err := m.norm(pfx + "attn_k_norm.weight")
+			if err != nil {
+				return nil, err
+			}
+			qn, kn = make([][]float32, T), make([][]float32, T)
+			for t := 0; t < T; t++ {
+				qn[t] = m.normHeads(qb[t], wq, m.nHead)
+				kn[t] = m.normHeads(kb[t], wk, m.nHeadKV)
+			}
+			qb, kb = qn, kn
+		}
+		fbl := m.freqBase
+		if m.isSWA(il) {
+			fbl = m.freqBaseSWA
+		}
 		qr := make([][]float32, T)
 		kr := make([][]float32, T)
 		for t := 0; t < T; t++ {
 			pos := m.nPast + t
-			qr[t] = make([]float32, m.nEmbd)
+			qr[t] = make([]float32, m.nHead*m.hDim)
 			for h := 0; h < m.nHead; h++ {
-				copy(qr[t][h*m.hDim:(h+1)*m.hDim], RopeRow(qb[t][h*m.hDim:(h+1)*m.hDim], pos, m.nDims, m.freqBase, m.freqScale, 1, m.neox, m.freqFactors))
+				copy(qr[t][h*m.hDim:(h+1)*m.hDim], RopeRow(qb[t][h*m.hDim:(h+1)*m.hDim], pos, m.nDims, fbl, m.freqScale, 1, m.neox, m.freqFactors))
 			}
 			kr[t] = make([]float32, m.nHeadKV*m.hDim)
 			for h := 0; h < m.nHeadKV; h++ {
-				copy(kr[t][h*m.hDim:(h+1)*m.hDim], RopeRow(kb[t][h*m.hDim:(h+1)*m.hDim], pos, m.nDims, m.freqBase, m.freqScale, 1, m.neox, m.freqFactors))
+				copy(kr[t][h*m.hDim:(h+1)*m.hDim], RopeRow(kb[t][h*m.hDim:(h+1)*m.hDim], pos, m.nDims, fbl, m.freqScale, 1, m.neox, m.freqFactors))
 			}
 			m.kCache[il] = append(m.kCache[il], f16Row(kr[t]))
 			m.vCache[il] = append(m.vCache[il], f16Row(vb[t]))
 		}
+		qs := qr
+		if m.gemma { // Q pre-scaled by the attention scale, softmax scale 1
+			qs = make([][]float32, T)
+			for t := 0; t < T; t++ {
+				qs[t] = scaleRow(qr[t], m.attnScale)
+			}
+		}
 		nKV := len(m.kCache[il])
 		kqvOut := make([][]float32, T)
+		kqs := m.kqScale
+		if m.gemma {
+			kqs = 1
+		}
 		for t := 0; t < T; t++ {
 			pos := m.nPast + t
-			kqvOut[t] = make([]float32, m.nEmbd)
+			kqvOut[t] = make([]float32, m.nHead*m.hDim)
 			for h := 0; h < m.nHead; h++ {
 				hk := h / gqa
-				qh := f16Row(qr[t][h*m.hDim : (h+1)*m.hDim])
+				qh := f16Row(qs[t][h*m.hDim : (h+1)*m.hDim])
 				kq := make([]float32, nKV)
 				mask := make([]float32, nKV)
 				for j := 0; j < nKV; j++ {
 					kq[j] = f16Dot(m.kCache[il][j][hk*m.hDim:(hk+1)*m.hDim], qh)
-					if j > pos {
+					if j > pos || (m.isSWA(il) && pos-j >= m.nSWA) {
 						mask[j] = float32(math.Inf(-1))
 					}
 				}
-				p := f16Row(SoftMaxRow(kq, m.kqScale, mask))
+				p := f16Row(SoftMaxRow(kq, kqs, mask))
 				for d := 0; d < m.hDim; d++ {
 					col := make([]uint16, nKV)
 					for j := 0; j < nKV; j++ {
@@ -511,12 +578,22 @@ func (m *Reexec) Forward(tokens []int, trace map[string][]float32) ([]float32, e
 		if err != nil {
 			return nil, err
 		}
-		var attnOut, ffnInp, cur2, gate, up, sw, down []float32
+		var attnOut, attnPost, ffnInp, cur2, gate, up, sw, down, ffnPost []float32
+		postAttn, postFFN := m.has(pfx+"post_attention_norm.weight"), m.has(pfx+"post_ffw_norm.weight")
 		for t := 0; t < T; t++ {
 			if attnOut, err = m.mm(pfx+"attn_output.weight", kqvOut[t]); err != nil {
 				return nil, err
 			}
-			ffnInp = AddRow(x[t], attnOut)
+			if postAttn {
+				w, err := m.norm(pfx + "post_attention_norm.weight")
+				if err != nil {
+					return nil, err
+				}
+				attnPost = RmsNormRow(attnOut, w, m.eps)
+				ffnInp = AddRow(attnPost, x[t])
+			} else {
+				ffnInp = AddRow(x[t], attnOut)
+			}
 			cur2 = RmsNormRow(ffnInp, wn2, m.eps)
 			if gate, err = m.mm(pfx+"ffn_gate.weight", cur2); err != nil {
 				return nil, err
@@ -524,11 +601,24 @@ func (m *Reexec) Forward(tokens []int, trace map[string][]float32) ([]float32, e
 			if up, err = m.mm(pfx+"ffn_up.weight", cur2); err != nil {
 				return nil, err
 			}
-			sw = SwigluRow(gate, up)
+			if m.gemma {
+				sw = GegluRow(gate, up)
+			} else {
+				sw = SwigluRow(gate, up)
+			}
 			if down, err = m.mm(pfx+"ffn_down.weight", sw); err != nil {
 				return nil, err
 			}
-			x[t] = AddRow(down, ffnInp)
+			if postFFN {
+				w, err := m.norm(pfx + "post_ffw_norm.weight")
+				if err != nil {
+					return nil, err
+				}
+				ffnPost = RmsNormRow(down, w, m.eps)
+				x[t] = AddRow(ffnPost, ffnInp)
+			} else {
+				x[t] = AddRow(down, ffnInp)
+			}
 		}
 		if trace != nil {
 			s := fmt.Sprintf("-%d", il)
@@ -548,9 +638,24 @@ func (m *Reexec) Forward(tokens []int, trace map[string][]float32) ([]float32, e
 			trace["ffn_norm"+s] = cur2
 			trace["ffn_gate"+s] = gate
 			trace["ffn_up"+s] = up
-			trace["ffn_swiglu"+s] = sw
+			if m.gemma {
+				trace["ffn_geglu"+s] = sw
+			} else {
+				trace["ffn_swiglu"+s] = sw
+			}
 			trace["ffn_out"+s] = down
 			trace["l_out"+s] = x[T-1]
+			if qn != nil {
+				trace["Qcur_normed"+s] = qn[T-1]
+				trace["Kcur_normed"+s] = kn[T-1]
+			}
+			if postAttn {
+				trace["attn_post_norm"+s] = attnPost
+				trace["sa_out"+s] = ffnInp
+			}
+			if postFFN {
+				trace["ffn_post_norm"+s] = ffnPost
+			}
 		}
 	}
 	m.nPast += T
@@ -573,13 +678,14 @@ func (m *Reexec) Forward(tokens []int, trace map[string][]float32) ([]float32, e
 // ---------------------------------------------------------------- dump replay
 
 type reexecEval struct {
-	tokens []int
-	rows   map[string][]float32
+	tokens  []int
+	rows    map[string][]float32
+	posLast int // position of the last token (from the first RoPE row), -1 when absent
 }
 
 func readReexecEvals(r io.Reader) ([]reexecEval, error) {
 	var evals []reexecEval
-	cur := reexecEval{rows: map[string][]float32{}}
+	cur := reexecEval{rows: map[string][]float32{}, posLast: -1}
 	sc := bufio.NewScanner(r)
 	sc.Buffer(make([]byte, 1<<20), 1<<28)
 	for sc.Scan() {
@@ -591,6 +697,7 @@ func readReexecEvals(r io.Reader) ([]reexecEval, error) {
 			Tensor string `json:"tensor"`
 			Hex    string `json:"hex"`
 			IDs    []int  `json:"ids"`
+			Pos    *int   `json:"pos"`
 		}
 		if err := json.Unmarshal([]byte(line), &d); err != nil {
 			return nil, err
@@ -613,10 +720,13 @@ func readReexecEvals(r io.Reader) ([]reexecEval, error) {
 		}
 		if _, seen := cur.rows[name]; !seen {
 			cur.rows[name] = vals
+			if d.Pos != nil && cur.posLast < 0 {
+				cur.posLast = *d.Pos
+			}
 		}
 		if name == "result_output" {
 			evals = append(evals, cur)
-			cur = reexecEval{rows: map[string][]float32{}}
+			cur = reexecEval{rows: map[string][]float32{}, posLast: -1}
 		}
 	}
 	return evals, sc.Err()
@@ -645,7 +755,11 @@ func ReexecDump(g *GGUF, dump io.Reader, maxEvals int, progress func(string)) (b
 	total, bad := 0, 0
 	first := ""
 	for ei, ev := range evals {
-		if len(ev.tokens) > 1 {
+		restart := len(ev.tokens) > 1
+		if ev.posLast >= 0 {
+			restart = ev.posLast-(len(ev.tokens)-1) == 0 // position 0 (re)starts the sequence
+		}
+		if restart {
 			m.Reset()
 		}
 		trace := map[string][]float32{}
@@ -661,8 +775,8 @@ func ReexecDump(g *GGUF, dump io.Reader, maxEvals int, progress func(string)) (b
 		}
 		for name, row := range ev.rows {
 			got, ok := trace[name]
-			if !ok {
-				continue
+			if !ok || len(row) == 0 {
+				continue // a prompt chunk without logits leaves an empty marker row
 			}
 			total++
 			same := len(got) == len(row)

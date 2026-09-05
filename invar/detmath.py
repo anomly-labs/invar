@@ -225,6 +225,31 @@ def rope_sincos_ff(pos: float, i: int, n_dims: int, freq_base: float, freq_scale
     return f32(s), f32(c)
 
 
+def tanh_d(y: float) -> float:
+    if y > 20.0:
+        return 1.0
+    if y < -20.0:
+        return -1.0
+    u = exp_d(2.0 * y)
+    return (u - 1.0) / (u + 1.0)
+
+
+def tanhf(x: float) -> float:
+    if x != x:
+        return x
+    return f32(tanh_d(x))
+
+
+_GELU_COEF_A = f32(0.044715)
+_SQRT_2_OVER_PI = f32(0.79788456080286535587989211986876)
+
+
+def geluf(x: float) -> float:
+    """ggml's tanh-GELU with its operation order: 0.5f*x*(1 + tanhf(S*x*(1 + A*x*x)))."""
+    inner = fmul(_SQRT_2_OVER_PI, fmul(x, fadd(1.0, fmul(_GELU_COEF_A, fmul(x, x)))))
+    return fmul(fmul(0.5, x), fadd(1.0, tanhf(inner)))
+
+
 def sigmoidf(x: float) -> float:
     return fdiv(1.0, fadd(1.0, expf(-x)))
 
@@ -261,6 +286,10 @@ def rope_row(x, pos: int, n_dims: int, freq_base: float, freq_scale: float, attn
 
 def swiglu_row(gate, up):
     return [fmul(siluf(g), u) for g, u in zip(gate, up)]
+
+
+def geglu_row(gate, up):
+    return [fmul(geluf(g), u) for g, u in zip(gate, up)]
 
 
 def add_row(a, b):

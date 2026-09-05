@@ -1,6 +1,6 @@
 Copyright (c) 2026 Anomly, Inc. All rights reserved. Author: Ry Bruscoe.
 
-# The exact profile, as a specification (`llamacpp-bposit8-quire-v0`, draft 1.1)
+# The exact profile, as a specification (`llamacpp-bposit8-quire-v0`, draft 1.2)
 
 This document defines the arithmetic of the exact profile precisely enough that an
 implementation written from it, in any language on any IEEE-754 machine, produces the
@@ -129,6 +129,23 @@ GGUF: `n_layer`, `n_embd`, `n_head`, `n_head_kv`, `head_dim = n_embd / n_head`,
 3. **Final**: `h = norm(x, w_out)`; `logits = W_out h` (tied to `token_embd` when absent).
 4. **Greedy decoding**: the next token is `argmax` of the logits (lowest index on ties);
    the served output text is the detokenisation of the sampled tokens.
+
+### 4.1 Gemma 3 variant
+With architecture `gemma3` the graph differs as follows (all other steps unchanged):
+the embedding row is multiplied by `f32(sqrt(n_embd))` (float32); `head_dim` is
+`attention.key_length`; after the projections, `q` and `k` are RMSNormed per head with
+`attn_q_norm` / `attn_k_norm` (§4.2.1 with `n = head_dim`); RoPE is NEOX-style with
+`freq_base_swa` on sliding-window layers (layer `il` is a sliding-window layer unless
+`(il + 1)` is a multiple of `attention.sliding_window_pattern`, default 6) and `freq_base`
+on the others; `q` is then multiplied by `f32(1/sqrt(head_dim))` and the softmax scale is 1;
+the mask of a sliding-window layer also excludes positions `j` with `pos − j ≥ sliding_window`;
+the attention output is RMSNormed with `post_attention_norm` before the residual add
+(`sa = norm(o) + x`); the FFN uses GEGLU, `a_i = gelu(g_i) · u_i` with
+`gelu(x) = (0.5·x)·(1 + tanh(S·(x·(1 + A·(x·x)))))` in float32 operations, `A = 0.044715f`,
+`S = 0.79788456080286535587989211986876f`, and `tanh(y) = f32((e^{2y} − 1)/(e^{2y} + 1))`
+in binary64 with `exp` from §3 (±1 beyond |y| > 20); the FFN output is RMSNormed with
+`post_ffw_norm` before its residual add. A prompt may reach the model in several
+evaluations; positions continue across them and position 0 restarts the sequence.
 
 ## 5. What the profile pins outside this document
 Tokenisation and chat templating (the token ids are certified through the dump digest),

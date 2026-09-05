@@ -38,6 +38,8 @@ func TestDetmathConformance(t *testing.T) {
 		switch p[0] {
 		case "expf":
 			ok = hb(DetExpf(f32(p[1]))) == p[2]
+		case "gelu":
+			ok = hb(Geluf(f32(p[1]))) == p[2]
 		case "silu":
 			ok = hb(Siluf(f32(p[1]))) == p[2]
 		case "sincos":
