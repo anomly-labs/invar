@@ -142,7 +142,11 @@ PATH (or `INVAR_REEXEC_BIN`), Python otherwise; the certified output text is che
 the reference greedy chain either way.
 
 SmolLM2-1.7B in b-posit8 (converted tonight) decodes at 7 tok/s exact on 16 CPU threads;
-its dumps are byte-identical across the two x86 binaries too.
+its dumps are byte-identical across the two x86 binaries too. **Llama-3.2-1B-Instruct**
+(grouped-query attention 32/8, a 128k tied vocabulary, and Llama-3 RoPE frequency factors,
+now part of the deterministic RoPE on both backends and in the spec) is byte-identical across
+the two binaries at 10 tok/s exact, and the Go reference reproduces all 908 rows of its
+dump in 63 s. Two model families so far: SmolLM2 and Llama 3.
 
 So the exact profile is no longer defined by a binary; EXACT-PROFILE-SPEC.md writes it down
 as a specification a fourth implementation can be built from. Two independent implementations,

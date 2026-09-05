@@ -498,6 +498,7 @@ def verify_elementwise(gguf_path: str, dump_path: str, max_evals: int = 0) -> tu
     freq_base = float(kv.get(f"{arch}.rope.freq_base", 10000.0))
     freq_scale = 1.0 / float(kv.get(f"{arch}.rope.scaling.factor", 1.0))
     neox = arch in _ROPE_NEOX_ARCHS
+    freq_factors = g.f32_tensor("rope_freqs.weight") if "rope_freqs.weight" in g.tensors else None
     evals = read_dump_units(dump_path)
     if max_evals:
         evals = evals[:max_evals]
@@ -527,7 +528,7 @@ def verify_elementwise(gguf_path: str, dump_path: str, max_evals: int = 0) -> tu
     def rope_all_heads(row, pos, nh):
         out = []
         for h in range(nh):
-            out += dm.rope_row(row[h * head_dim:(h + 1) * head_dim], pos, n_dims, freq_base, freq_scale, 1.0, neox)
+            out += dm.rope_row(row[h * head_dim:(h + 1) * head_dim], pos, n_dims, freq_base, freq_scale, 1.0, neox, freq_factors)
         return out
 
     for ei, ev in enumerate(evals):

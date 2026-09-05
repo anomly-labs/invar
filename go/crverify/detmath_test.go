@@ -53,6 +53,12 @@ func TestDetmathConformance(t *testing.T) {
 			nd, _ := strconv.Atoi(p[3])
 			s, c := RopeSincos(float32(pos), i, nd, f32(p[4]), 1)
 			ok = hb(s) == p[5] && hb(c) == p[6]
+		case "ropeff":
+			pos, _ := strconv.Atoi(p[1])
+			i, _ := strconv.Atoi(p[2])
+			nd, _ := strconv.Atoi(p[3])
+			s, c := RopeSincosFF(float32(pos), i, nd, f32(p[4]), 1, f32(p[5]))
+			ok = hb(s) == p[6] && hb(c) == p[7]
 		case "rms":
 			cnt, _ := strconv.Atoi(p[1])
 			xs := make([]float32, cnt)

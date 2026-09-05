@@ -218,6 +218,13 @@ def rope_sincos(pos: float, i: int, n_dims: int, freq_base: float, freq_scale: f
     return f32(s), f32(c)
 
 
+def rope_sincos_ff(pos: float, i: int, n_dims: int, freq_base: float, freq_scale: float, ff: float) -> tuple[float, float]:
+    """RoPE with a per-pair frequency factor (Llama 3 rope_freqs): theta = ((pos*freq)/ff)*freq_scale."""
+    theta = ((float(pos) * rope_freq(i, n_dims, freq_base)) / float(ff)) * float(freq_scale)
+    s, c = sincos_d(theta)
+    return f32(s), f32(c)
+
+
 def sigmoidf(x: float) -> float:
     return fdiv(1.0, fadd(1.0, expf(-x)))
 
@@ -229,13 +236,17 @@ def siluf(x: float) -> float:
 # ----------------------------------------------------------------------------- composite ops
 
 def rope_row(x, pos: int, n_dims: int, freq_base: float, freq_scale: float, attn_factor: float = 1.0,
-             neox: bool = False):
+             neox: bool = False, freq_factors=None):
     """RoPE of one row (float32 values) as both backends compute it: cos/sin from
-    rope_sincos times attn_factor, rotation x0*c - x1*s, x0*s + x1*c in float32."""
+    rope_sincos (with the pair's frequency factor when the model has rope_freqs) times
+    attn_factor, rotation x0*c - x1*s, x0*s + x1*c in float32."""
     y = list(x)
     half = n_dims // 2
     for i in range(half):
-        s, c = rope_sincos(pos, i, n_dims, freq_base, freq_scale)
+        if freq_factors is not None:
+            s, c = rope_sincos_ff(pos, i, n_dims, freq_base, freq_scale, freq_factors[i])
+        else:
+            s, c = rope_sincos(pos, i, n_dims, freq_base, freq_scale)
         c = fmul(c, attn_factor)
         s = fmul(s, attn_factor)
         if neox:

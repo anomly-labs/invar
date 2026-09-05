@@ -293,16 +293,28 @@ func RopeSincos(pos float32, i, nDims int, freqBase, freqScale float32) (s, c fl
 	return float32(sd), float32(cd)
 }
 
+// RopeSincosFF: RoPE with a per-pair frequency factor (Llama 3 rope_freqs).
+func RopeSincosFF(pos float32, i, nDims int, freqBase, freqScale, ff float32) (s, c float32) {
+	theta := dmul(ddiv(dmul(float64(pos), RopeFreq(i, nDims, freqBase)), float64(ff)), float64(freqScale))
+	sd, cd := DetSincosD(theta)
+	return float32(sd), float32(cd)
+}
+
 func Sigmoidf(x float32) float32 { return fdiv(1, fadd(1, DetExpf(-x))) }
 func Siluf(x float32) float32    { return fmul(x, Sigmoidf(x)) }
 
 // RopeRow rotates one head-dim slice in place semantics (returns a new slice).
-func RopeRow(x []float32, pos int, nDims int, freqBase, freqScale, attnFactor float32, neox bool) []float32 {
+func RopeRow(x []float32, pos int, nDims int, freqBase, freqScale, attnFactor float32, neox bool, ff []float32) []float32 {
 	y := make([]float32, len(x))
 	copy(y, x)
 	half := nDims / 2
 	for i := 0; i < half; i++ {
-		s, c := RopeSincos(float32(pos), i, nDims, freqBase, freqScale)
+		var s, c float32
+		if ff != nil {
+			s, c = RopeSincosFF(float32(pos), i, nDims, freqBase, freqScale, ff[i])
+		} else {
+			s, c = RopeSincos(float32(pos), i, nDims, freqBase, freqScale)
+		}
 		c = fmul(c, attnFactor)
 		s = fmul(s, attnFactor)
 		var i0, i1 int

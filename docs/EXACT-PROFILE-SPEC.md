@@ -1,6 +1,6 @@
 Copyright (c) 2026 Anomly, Inc. All rights reserved. Author: Ry Bruscoe.
 
-# The exact profile, as a specification (`llamacpp-bposit8-quire-v0`, draft 1)
+# The exact profile, as a specification (`llamacpp-bposit8-quire-v0`, draft 1.1)
 
 This document defines the arithmetic of the exact profile precisely enough that an
 implementation written from it, in any language on any IEEE-754 machine, produces the
@@ -111,8 +111,9 @@ GGUF: `n_layer`, `n_embd`, `n_head`, `n_head_kv`, `head_dim = n_embd / n_head`,
       `(s, c) = (f32(sin θ), f32(cos θ))`, each multiplied by the attention factor (1
       unless YaRN); with `x0, x1` the pair's elements (adjacent for the NORM style,
       `i` and `i + n_rot/2` for NEOX), the rotated pair is `(x0·c − x1·s, x0·s + x1·c)` in
-      float32 operations (products first, then the subtraction / addition). YaRN and
-      per-dimension frequency factors are outside draft 1.
+      float32 operations (products first, then the subtraction / addition). When the GGUF
+      carries `rope_freqs.weight` (Llama 3 style factors `ff_i`, one per pair), the angle
+      is `θ = ((pos · freq_i) / ff_i) · freq_scale` in binary64. YaRN is outside draft 1.
    4. **KV cache**: the rotated `k` and `v` are rounded to binary16 and appended.
    5. **Attention** per head `h` with kv head `h / (n_head / n_head_kv)`: `q_h` is rounded
       to binary16; `kq_j` = the exact binary16 dot of cached `k_j` with `q_h` (§2) for

@@ -178,6 +178,7 @@ class LlamaReexec:
         from .spotcheck import _ROPE_NEOX_ARCHS
         self.neox = arch in _ROPE_NEOX_ARCHS
         self.kq_scale = dm.f32(1.0 / math.sqrt(float(self.head_dim)))       # 1.0f/sqrtf(n_embd_head)
+        self.freq_factors = g.f32_tensor("rope_freqs.weight") if "rope_freqs.weight" in g.tensors else None
         self.W: dict[str, BP8Matrix] = {}
         self.norms: dict[str, list[float]] = {}
         self.tok_embd = BP8Matrix(g, "token_embd.weight")
@@ -227,10 +228,10 @@ class LlamaReexec:
                 pos = pos0 + t
                 for h in range(self.n_head):
                     sl = slice(h * self.head_dim, (h + 1) * self.head_dim)
-                    qr[t, sl] = dm.rope_row(q[t, sl].tolist(), pos, self.n_dims, self.freq_base, self.freq_scale, 1.0, self.neox)
+                    qr[t, sl] = dm.rope_row(q[t, sl].tolist(), pos, self.n_dims, self.freq_base, self.freq_scale, 1.0, self.neox, self.freq_factors)
                 for h in range(self.n_head_kv):
                     sl = slice(h * self.head_dim, (h + 1) * self.head_dim)
-                    kr[t, sl] = dm.rope_row(k[t, sl].tolist(), pos, self.n_dims, self.freq_base, self.freq_scale, 1.0, self.neox)
+                    kr[t, sl] = dm.rope_row(k[t, sl].tolist(), pos, self.n_dims, self.freq_base, self.freq_scale, 1.0, self.neox, self.freq_factors)
             if trace is not None:
                 trace[il].update(Qcur_rope=qr[-1], Kcur_rope=kr[-1])
             # KV cache in f16 (round-to-nearest)

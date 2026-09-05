@@ -290,6 +290,7 @@ type Reexec struct {
 	w                                   map[string]*bp8Matrix
 	norms                               map[string][]float32
 	kCache, vCache                      [][][]uint16 // [layer][pos][nHeadKV*hDim]
+	freqFactors                         []float32    // rope_freqs.weight (Llama 3), nil otherwise
 	nPast                               int
 	outName                             string
 }
@@ -332,6 +333,13 @@ func NewReexec(g *GGUF) (*Reexec, error) {
 	m.freqScale = float32(1.0 / kvFloat(g.KV, arch+".rope.scaling.factor", 1))
 	m.neox = ropeNeoxArchs[arch]
 	m.kqScale = float32(1.0 / math.Sqrt(float64(m.hDim)))
+	if _, ok := g.Tensors["rope_freqs.weight"]; ok {
+		ff, err := g.f32Tensor("rope_freqs.weight")
+		if err != nil {
+			return nil, err
+		}
+		m.freqFactors = ff
+	}
 	if _, ok := g.Tensors["output.weight"]; ok {
 		m.outName = "output.weight"
 	} else {
@@ -435,11 +443,11 @@ func (m *Reexec) Forward(tokens []int, trace map[string][]float32) ([]float32, e
 			pos := m.nPast + t
 			qr[t] = make([]float32, m.nEmbd)
 			for h := 0; h < m.nHead; h++ {
-				copy(qr[t][h*m.hDim:(h+1)*m.hDim], RopeRow(q[t][h*m.hDim:(h+1)*m.hDim], pos, m.nDims, m.freqBase, m.freqScale, 1, m.neox))
+				copy(qr[t][h*m.hDim:(h+1)*m.hDim], RopeRow(q[t][h*m.hDim:(h+1)*m.hDim], pos, m.nDims, m.freqBase, m.freqScale, 1, m.neox, m.freqFactors))
 			}
 			kr[t] = make([]float32, m.nHeadKV*m.hDim)
 			for h := 0; h < m.nHeadKV; h++ {
-				copy(kr[t][h*m.hDim:(h+1)*m.hDim], RopeRow(k[t][h*m.hDim:(h+1)*m.hDim], pos, m.nDims, m.freqBase, m.freqScale, 1, m.neox))
+				copy(kr[t][h*m.hDim:(h+1)*m.hDim], RopeRow(k[t][h*m.hDim:(h+1)*m.hDim], pos, m.nDims, m.freqBase, m.freqScale, 1, m.neox, m.freqFactors))
 			}
 			m.kCache[il] = append(m.kCache[il], f16Row(kr[t]))
 			m.vCache[il] = append(m.vCache[il], f16Row(v[t]))
