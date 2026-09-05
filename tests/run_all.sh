@@ -51,4 +51,10 @@ python3 tests/test_deploy.py || rc=$?
 echo
 echo "===== INVAR CR-v0.1 conformance (byte-compat with the spec) ====="
 python3 tests/test_cr_conformance.py || rc=$?
+
+echo
+echo "===== INVAR exact profile: detmath conformance, reference re-execution, tokenizer (skip without their optional deps/models) ====="
+python3 tests/test_detmath.py || rc=$?
+python3 tests/test_reexec_fixture.py || rc=$?
+python3 tests/test_tokenizer_models.py || rc=$?
 exit $rc
