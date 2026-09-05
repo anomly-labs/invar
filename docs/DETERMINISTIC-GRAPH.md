@@ -126,6 +126,13 @@ runtime sampled next. A 1-ulp change to one attention row in the dump is rejecte
 at about 1.3 s per prompt token and 1.6 s per decode token on SmolLM2-135M, and is reachable
 as `invar verify --spot-check --reexec` (needs numpy, `pip install anomly-invar[reexec]`).
 
+With the receipt's certified output digest, `invar verify --reexec` goes one step further:
+it detokenises the reference implementation's own greedy chain (the single-token evaluations
+after the prompt plus the argmax of the last logits) and compares it with the certified
+output text. On a receipt minted on the RTX 5090 the reference chain reproduced the
+certified 8-token answer exactly, so the receipt's output is reproduced by an implementation
+that shares no code with the one that served it.
+
 So the exact profile is no longer defined by a binary. Two independent implementations,
 in different languages, on CPUs of two architectures and on a GPU, produce the same bits
 from the same weights and tokens. What is still the runtime's: tokenisation (the token

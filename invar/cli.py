@@ -359,7 +359,7 @@ def main():
                                 why += "; elementwise: " + ewhy
                 if ok and a.reexec:
                     from .reexec import reexec_dump
-                    rok, rwhy = reexec_dump(a.model, path)
+                    rok, rwhy = reexec_dump(a.model, path, expect_text_digest=e["manifest"]["outputs"]["text"])
                     ok = ok and rok
                     why += "; reexec: " + rwhy
             elif ok and e["manifest"].get("profile") == LLAMACPP_EXACT_PROFILE:

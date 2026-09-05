@@ -316,8 +316,48 @@ def compare_rows(a: np.ndarray, b: np.ndarray) -> int:
     return int((a != b).sum())
 
 
-def reexec_dump(gguf_path: str, dump_path: str, max_evals: int = 0) -> tuple[bool, str]:
-    """Library form of the driver: (ok, one-line reason)."""
+# --------------------------------------------------------------------------- detokenisation (GPT-2 byte level)
+
+def _byte_decoder() -> dict[str, int]:
+    bs = list(range(ord("!"), ord("~") + 1)) + list(range(ord("\u00a1"), ord("\u00ac") + 1)) + list(range(ord("\u00ae"), ord("\u00ff") + 1))
+    cs = bs[:]
+    n = 0
+    for b in range(256):
+        if b not in bs:
+            bs.append(b)
+            cs.append(256 + n)
+            n += 1
+    return {chr(c): b for b, c in zip(bs, cs)}
+
+
+def detokenize(g: GGUF, ids: list[int]) -> str:
+    """Text of generated token ids: byte-level pieces decoded to UTF-8 (gpt2-style vocabularies),
+    control tokens (type 3) skipped; sentencepiece-style vocabularies map the space marker."""
+    toks = g.kv["tokenizer.ggml.tokens"]
+    types = g.kv.get("tokenizer.ggml.token_type", [])
+    model = g.kv.get("tokenizer.ggml.model", "gpt2")
+    out = bytearray()
+    if model == "gpt2":
+        dec = _byte_decoder()
+        for t in ids:
+            if t < len(types) and types[t] == 3:
+                continue
+            out += bytes(dec.get(ch, ord("?")) for ch in toks[t])
+    else:
+        for t in ids:
+            if t < len(types) and types[t] == 3:
+                continue
+            out += toks[t].replace("\u2581", " ").encode("utf-8")
+    return out.decode("utf-8", "replace")
+
+
+def reexec_dump(gguf_path: str, dump_path: str, max_evals: int = 0,
+                expect_text_digest: str | None = None) -> tuple[bool, str]:
+    """Library form of the driver: (ok, one-line reason). With expect_text_digest (the receipt's
+    outputs.text) the greedy chain — the single-token evaluations after the prompt plus the argmax
+    of the last logits — is detokenised and its digest compared: the reference implementation
+    then reproduces the certified output itself, not only the served activations."""
+    from .crcore import digest_bytes
     evals = read_dump_evals(dump_path)
     if max_evals:
         evals = evals[:max_evals]
@@ -326,11 +366,18 @@ def reexec_dump(gguf_path: str, dump_path: str, max_evals: int = 0) -> tuple[boo
     model = LlamaReexec(gguf_path)
     total = bad = 0
     first_bad = ""
+    generated: list[int] = []
+    seen_prompt = False
+    last_logits = None
     for ei, ev in enumerate(evals):
         trace: dict = {}
         if len(ev["tokens"]) > 1:
             model.reset()
-        model.forward(ev["tokens"], trace)
+            seen_prompt = True
+            generated = []
+        elif seen_prompt:
+            generated.append(ev["tokens"][0])
+        last_logits = model.forward(ev["tokens"], trace)
         for il, lay in ev["layers"].items():
             for name, row in lay.items():
                 if il in trace and name in trace[il]:
@@ -345,7 +392,19 @@ def reexec_dump(gguf_path: str, dump_path: str, max_evals: int = 0) -> tuple[boo
                 first_bad = f"eval {ei} {key}"
     if bad:
         return False, f"{bad}/{total} traced rows differ from the reference implementation (first: {first_bad})"
-    return True, f"{total} traced rows + logits of {len(evals)} evaluations reproduced bit-exactly by the reference implementation (Python, no llama.cpp)"
+    why = f"{total} traced rows + logits of {len(evals)} evaluations reproduced bit-exactly by the reference implementation (Python, no llama.cpp)"
+    if expect_text_digest is not None and last_logits is not None and seen_prompt:
+        eos = int(model.g.kv.get("tokenizer.ggml.eos_token_id", -1))
+        chain = list(generated)
+        final = int(np.argmax(last_logits))
+        if final != eos:
+            chain.append(final)
+        text = detokenize(model.g, chain)
+        if digest_bytes(text.encode()) == expect_text_digest:
+            why += f"; certified output text ({len(chain)} tokens) reproduced by the reference greedy chain"
+        else:
+            return False, why + f"; the reference greedy chain ({len(chain)} tokens) does NOT reproduce the certified output text"
+    return True, why
 
 
 def main(argv=None) -> int:
