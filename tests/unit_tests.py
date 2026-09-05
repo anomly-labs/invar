@@ -1644,6 +1644,27 @@ def sec_device_pin(tmp, art):
     check("cli verify --cross-deployment: ACCEPT", code == 0 and "CROSS-DEPLOYMENT" in out)
 
 
+def sec_tokens():
+    """tokens.py: byte-level detokenisation and the reference greedy chain."""
+    from invar.tokens import detokenize, greedy_chain, _byte_decoder
+    print("\n[tokens]")
+    dec = _byte_decoder()
+    check("byte decoder: printable ASCII maps to itself, \u0120 -> space, \u010a -> newline",
+          dec["A"] == 65 and dec["\u0120"] == 32 and dec["\u010a"] == 10 and len(dec) == 256)
+    kv = {"tokenizer.ggml.model": "gpt2", "tokenizer.ggml.tokens": ["<s>", "Here", "\u0120are", "\u0120caf\u00c3\u00a9", "\u010a", "<|end|>"],
+          "tokenizer.ggml.token_type": [3, 1, 1, 1, 1, 3]}
+    check("detokenize: pieces decode to UTF-8 text, control tokens skipped",
+          detokenize(kv, [0, 1, 2, 3, 4, 5]) == "Here are caf\u00e9\n")
+    kv2 = {"tokenizer.ggml.model": "llama", "tokenizer.ggml.tokens": ["<s>", "\u2581Hello", "\u2581world"], "tokenizer.ggml.token_type": [3, 1, 1]}
+    check("detokenize: sentencepiece marker -> space", detokenize(kv2, [0, 1, 2]) == " Hello world")
+    evals = [[0, 0], [1, 9, 8, 7], [11], [12], [13]]
+    check("greedy chain: single-token evals after the last prompt, plus the final argmax",
+          greedy_chain(evals, 14, eos=2) == [11, 12, 13, 14])
+    check("greedy chain: final argmax == EOS is not part of the text", greedy_chain(evals, 2, eos=2) == [11, 12, 13])
+    check("greedy chain: a later multi-token eval restarts the chain",
+          greedy_chain([[1, 2, 3], [5], [1, 2, 3, 4], [6]], 7, eos=2) == [6, 7])
+
+
 def main():
     tmp = tempfile.mkdtemp(prefix="invar-unit-")
     try:
@@ -1658,6 +1679,7 @@ def main():
         sec_ollama(tmp, art)
         sec_hwsign_attest(tmp, art)
         sec_device_pin(tmp, art)
+        sec_tokens()
     finally:
         import shutil
         shutil.rmtree(tmp, ignore_errors=True)

@@ -63,6 +63,10 @@ Decode at 128 tokens, 8 CPU threads, this fork's binary (deterministic everywher
 | RTX 5090 | 102 tok/s | 458 tok/s |
 | x86 CPU | 49 tok/s | 150 tok/s |
 
+At a 600-token context on the CPU (8 threads, SmolLM2-135M) the exact path decodes at
+37 tok/s against q8_0 at 75 in the same binary: attention dominates both and both use the
+exact float16 attention here, so the gap narrows to 2× as context grows.
+
 The float paths of this fork are slower than upstream llama.cpp (q8_0 on the 5090 was
 1,160 tok/s before the deterministic softmax, exact float16 attention and `-fmad=false`),
 because determinism here is a global build property, not a switch. That is the trade of
@@ -149,8 +153,10 @@ the two binaries at 10 tok/s exact, and the Go reference reproduces all 908 rows
 dump in 63 s. **Qwen2.5-0.5B-Instruct** (NEOX-style RoPE and Q/K/V projection biases,
 which the dump now records as `Qcur_bias` rows) is byte-identical across the two binaries
 at 14 tok/s exact; the Go reference reproduces all 1,935 rows of its dump in 25 s and the
-elementwise verifier re-executes the bias additions. Three model families so far: SmolLM2,
-Llama 3 and Qwen2.5.
+elementwise verifier re-executes the bias additions; on the RTX 5090 (in the memory left
+beside another workload) its first three evaluations are byte-identical to the CPU, so the
+CUDA NEOX RoPE and bias path is covered too. Three model families so far: SmolLM2, Llama 3
+and Qwen2.5.
 
 So the exact profile is no longer defined by a binary; EXACT-PROFILE-SPEC.md writes it down
 as a specification a fourth implementation can be built from. Two independent implementations,
