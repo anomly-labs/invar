@@ -35,6 +35,33 @@ def _profiles(path: str) -> set[str]:
         return {json.loads(line)["manifest"].get("profile", "") for line in f}
 
 
+def _tokenisation_note(model: str, dump: str, prompt_text: str | None, unix_time: int | None) -> str:
+    """'; tokenisation: ...' — whether the certified prompt re-tokenises to the certified ids
+    (byte-level BPE vocabularies; dated templates use the receipt's day)."""
+    import datetime
+    from .spotcheck import GGUF
+    from .tokens import dump_token_evals, dump_eval_first_positions, prompt_ids_from_dump
+    if prompt_text is None:
+        return "; tokenisation: not checked (no prompt text)"
+    kv = GGUF(model).kv
+    try:
+        from .tokenizer import BPETokenizer
+        tok = BPETokenizer(kv)
+    except (ImportError, ValueError) as e:
+        return f"; tokenisation: not checked ({e})"
+    want = prompt_ids_from_dump(dump_token_evals(dump), dump_eval_first_positions(dump))
+    if want is None:
+        return "; tokenisation: not checked (dump carries no positions)"
+    day = datetime.datetime.fromtimestamp(unix_time, datetime.timezone.utc).date() if unix_time else None
+    try:
+        got = tok.prompt_ids(prompt_text, now=day)
+    except Exception as e:                       # noqa: BLE001 — a template we cannot render is a finding, not a crash
+        return f"; tokenisation: not checked (template: {str(e)[:80]})"
+    if got == want:
+        return f"; tokenisation: certified prompt re-tokenised to the certified {len(want)} ids (llama.cpp {tok.pre} BPE)"
+    return f"; tokenisation: certified prompt re-tokenises to {len(got)} ids, the runtime fed {len(want)} (NOT reproduced)"
+
+
 def _reexec_entry(model: str, dump: str, text_digest: str) -> tuple[bool, str]:
     """Whole-graph reference re-execution of one certified dump: the Go binary
     (INVAR_REEXEC_BIN or invar-reexec on PATH) when present, else the Python reference
@@ -398,6 +425,11 @@ def main():
                     rok, rwhy = _reexec_entry(a.model, path, e["manifest"]["outputs"]["text"])
                     ok = ok and rok
                     why += "; reexec: " + rwhy
+                    if ok:
+                        pt = e.get("prompt_text")
+                        if pt is not None and digest_bytes(pt.encode()) != e["manifest"]["inputs"]["prompt"]:
+                            pt = None
+                        why += _tokenisation_note(a.model, path, pt, e["manifest"].get("unix_time"))
             elif ok and e["manifest"].get("profile") == LLAMACPP_EXACT_PROFILE:
                 why += "; spot-check: no dump certified for this entry"
             new_results.append((i, ok, why))

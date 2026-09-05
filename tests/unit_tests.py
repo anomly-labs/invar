@@ -1665,6 +1665,45 @@ def sec_tokens():
           greedy_chain([[1, 2, 3], [5], [1, 2, 3, 4], [6]], 7, eos=2) == [6, 7])
 
 
+def sec_tokenizer():
+    """tokenizer.py: byte-level BPE with llama.cpp's pre-tokenizers on a synthetic vocabulary."""
+    print("\n[tokenizer]")
+    try:
+        import regex  # noqa: F401
+        import jinja2  # noqa: F401
+    except ImportError:
+        print("  [SKIP] regex/jinja2 not installed")
+        return
+    from invar.tokenizer import BPETokenizer
+    toks = ["<s>", "<|im_start|>", "<|im_end|>", "h", "i", "\u0120", "t", "e", "r", "hi", "\u0120t", "\u0120th", "\u0120the", "re", "\u0120there", "!", "\u010a", "u", "s", "us"]
+    types = [3, 3, 3] + [1] * (len(toks) - 3)
+    merges = ["h i", "\u0120 t", "\u0120t h", "r e", "\u0120th e", "\u0120the re", "u s"]
+    kv = {"tokenizer.ggml.model": "gpt2", "tokenizer.ggml.pre": "smollm", "tokenizer.ggml.tokens": toks,
+          "tokenizer.ggml.token_type": types, "tokenizer.ggml.merges": merges, "tokenizer.ggml.bos_token_id": 0,
+          "tokenizer.ggml.eos_token_id": 2, "tokenizer.ggml.add_bos_token": False,
+          "tokenizer.chat_template": "{% for m in messages %}{{ '<|im_start|>' + m['content'] + '<|im_end|>' }}{% endfor %}{% if add_generation_prompt %}{{ '<|im_start|>' }}{% endif %}"}
+    t = BPETokenizer(kv)
+    check("bpe: merges applied by rank ('hi there!' -> hi, \u0120there, !)", t.encode("hi there!") == [9, 14, 15])
+    check("bpe: special tokens matched literally, longest first",
+          t.encode("<|im_start|>hi<|im_end|>") == [1, 9, 2])
+    check("bpe: add_bos prepends once and never doubles", t.encode("<s>hi", add_bos=True) == [0, 9] and t.encode("hi", add_bos=True) == [0, 9])
+    kv2 = dict(kv, **{"tokenizer.ggml.pre": "no-such-pre"})
+    bad = False
+    try:
+        BPETokenizer(kv2)
+    except ValueError:
+        bad = True
+    check("bpe: unknown pre-tokenizer is refused, never guessed", bad)
+    ids = t.encode(t.render_chat([{"role": "user", "content": "hi"}], True))
+    check("chat template rendered and tokenised (<|im_start|>hi<|im_end|><|im_start|>)", ids == [1, 9, 2, 1])
+    bad = False
+    try:
+        t.encode("zzz")
+    except ValueError:
+        bad = True
+    check("bpe: a piece outside the vocabulary is a clear error", bad)
+
+
 def main():
     tmp = tempfile.mkdtemp(prefix="invar-unit-")
     try:
@@ -1680,6 +1719,7 @@ def main():
         sec_hwsign_attest(tmp, art)
         sec_device_pin(tmp, art)
         sec_tokens()
+        sec_tokenizer()
     finally:
         import shutil
         shutil.rmtree(tmp, ignore_errors=True)

@@ -177,6 +177,19 @@ from the same weights and tokens. What is still the runtime's: tokenisation (the
 ids come from the dump), the model architecture (llama-family graphs), and the sampling
 policy (greedy is exact by construction).
 
+## And the tokeniser (20:40)
+
+The last step that was the runtime's is not any more, for byte-level BPE vocabularies:
+`invar/tokenizer.py` renders the GGUF's chat template (jinja2, with `strftime_now` for
+dated templates) and tokenises the way llama.cpp does — special tokens matched literally,
+llama.cpp's own pre-tokeniser regexes per `tokenizer.ggml.pre` (`smollm`, `gpt2`,
+`llama-bpe`, `qwen2`), byte-level encoding, merges by rank, no doubled BOS. On the certified
+prompt of tonight's dumps it reproduces the runtime's token ids exactly for SmolLM2 (42 ids),
+Qwen2.5 (43) and Llama-3.2 (49, including the dated system prompt). `invar verify --reexec`
+now reports whether the certified prompt text re-tokenises to the certified ids, using the
+receipt's timestamp for date-dependent templates; Gemma's sentencepiece vocabulary is not
+covered yet and is reported as such.
+
 ## Scope and limits
 
 - Verified on x86-64 (AVX2, 1/4/16 threads, two different binaries), an RTX 5090, and an

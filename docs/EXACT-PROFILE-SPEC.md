@@ -1,6 +1,6 @@
 Copyright (c) 2026 Anomly, Inc. All rights reserved. Author: Ry Bruscoe.
 
-# The exact profile, as a specification (`llamacpp-bposit8-quire-v0`, draft 1.2)
+# The exact profile, as a specification (`llamacpp-bposit8-quire-v0`, draft 1.3)
 
 This document defines the arithmetic of the exact profile precisely enough that an
 implementation written from it, in any language on any IEEE-754 machine, produces the
@@ -148,7 +148,13 @@ in binary64 with `exp` from §3 (±1 beyond |y| > 20); the FFN output is RMSNorm
 evaluations; positions continue across them and position 0 restarts the sequence.
 
 ## 5. What the profile pins outside this document
-Tokenisation and chat templating (the token ids are certified through the dump digest),
+Chat templating and tokenisation for vocabularies other than byte-level BPE (for `gpt2`
+vocabularies with the `smollm`, `gpt2`, `llama-bpe` or `qwen2` pre-tokeniser the ids are
+defined: render the GGUF chat template with jinja2 semantics for the user message and
+`add_generation_prompt`, match control and user-defined tokens literally longest-first,
+split with llama.cpp's regexes for that pre-tokeniser, byte-level encode, merge by rank,
+prepend BOS once when `add_bos_token`; the token ids remain certified through the dump digest
+in every case),
 the model architecture (llama family in draft 1), flash attention off (`params.flash_attn`),
 warm-up off (`params.warmup`), and greedy sampling at temperature 0.
 

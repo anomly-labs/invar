@@ -63,3 +63,40 @@ def greedy_chain(evals_tokens: list[list[int]], final_argmax: int | None, eos: i
     if final_argmax is not None and final_argmax != eos:
         chain.append(final_argmax)
     return chain
+
+
+def prompt_ids_from_dump(evals_tokens: list[list[int]], first_positions: list[int | None]) -> list[int] | None:
+    """The prompt's token ids as the runtime fed them: the evaluations from the last restart
+    (first position 0) through the last multi-token evaluation, concatenated. None when the
+    dump carries no positions."""
+    if not first_positions or any(p is None for p in first_positions):
+        return None
+    start = max(i for i, p in enumerate(first_positions) if p == 0)
+    end = max(i for i, t in enumerate(evals_tokens) if len(t) > 1)
+    if end < start:
+        end = start
+    ids: list[int] = []
+    for t in evals_tokens[start:end + 1]:
+        ids += t
+    return ids
+
+
+def dump_eval_first_positions(path: str) -> list[int | None]:
+    """Per evaluation, the first token's position (from the first RoPE row carrying pos)."""
+    import json as _json
+    out: list[int | None] = []
+    n_tok = None
+    pos_last = None
+    with open(path) as f:
+        for line in f:
+            if '"tensor":"inp_tokens"' in line:
+                n_tok = len(_json.loads(line)["ids"])
+                pos_last = None
+                continue
+            if pos_last is None and '"pos":' in line:
+                pos_last = int(_json.loads(line)["pos"])
+            if '"tensor":"result_output"' in line:
+                out.append(None if (pos_last is None or n_tok is None) else pos_last - (n_tok - 1))
+                n_tok = None
+                pos_last = None
+    return out

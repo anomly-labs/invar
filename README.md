@@ -78,7 +78,8 @@ does not replace it. Boundary and setup: [docs/ATTESTATION.md](docs/ATTESTATION.
 Under the exact profile a receipt no longer depends on where it ran: minted on a GPU, it
 re-executes on a CPU with the same output digest (`invar verify --cross-deployment`), and a
 reference implementation in Python with no llama.cpp code reproduces every activation and
-logit from the weights and token ids (`invar verify --spot-check --reexec`).
+logit from the weights and token ids, and re-tokenises the certified prompt the way llama.cpp
+does for byte-level BPE vocabularies (`invar verify --spot-check --reexec`).
 
 ## What a receipt proves — and what it doesn't
 

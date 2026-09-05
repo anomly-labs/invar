@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "anomly-invar"
-version = "0.1.14"
+version = "0.1.15"
 description = "INVAR — receipted local AI: every inference carries a re-executable, hash-chained worldline receipt"
 readme = { text = "INVAR — receipted local AI by Anomly, Inc. Apache-2.0.", content-type = "text/plain" }
 requires-python = ">=3.10"
@@ -14,7 +14,7 @@ authors = [{ name = "Anomly, Inc." }]
 dependencies = ["cryptography>=41"]
 
 [project.optional-dependencies]
-reexec = ["numpy>=1.24"]
+reexec = ["numpy>=1.24", "regex", "jinja2>=3"]
 
 [project.scripts]
 invar = "invar.cli:main"
