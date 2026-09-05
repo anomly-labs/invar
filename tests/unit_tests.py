@@ -1360,6 +1360,53 @@ def sec_hwsign_attest(tmp, art):
     check("ledger tlog: unknown index -> 404", stc == 404)
     tsrv.shutdown()
 
+    # -- spot-check (CSC): codec vs the C golden LUT, stdlib GGUF reader, exact re-execution
+    from invar import spotcheck as SC
+    golden_h = os.path.expanduser("~/development/llama-cpp-et/tests/bposit8-quire-ref/bp8_dot_golden.h")
+    if os.path.exists(golden_h):
+        import re as _re
+        lut = _re.findall(r"\{ (\d), (-?\d+)LL, (-?\d+) \}", open(golden_h).read())[:256]
+        from fractions import Fraction as _F
+        agree = all(_F(int(M)) * _F(2) ** int(E) == _F(SC.LUT_M[c]) * _F(2) ** SC.LUT_E[c]
+                    for c, (k, M, E) in enumerate(lut) if int(k) == 0) and all(
+                    SC.LUT_M[c] == 0 for c, (k, M, E) in enumerate(lut) if int(k) != 0)
+        check("spotcheck codec: all 256 code values equal the rational golden LUT (M*2^E exact)",
+              len(lut) == 256 and agree)
+    real_gguf = os.path.expanduser("~/development/hackathon-artifacts/SmolLM2-135M-Instruct-bposit8.gguf")
+    llama_et = os.path.expanduser("~/development/llama-cpp-et/build/bin/llama-cli")
+    if os.path.exists(real_gguf):
+        g = SC.GGUF(real_gguf)
+        t = g.lm_head()
+        check("spotcheck GGUF reader: real b-posit8 GGUF parsed (file_type 42, tied lm_head 576x49152)",
+              g.file_type == 42 and t["dims"][:2] == [576, 49152] and t["type"] == SC.GGML_TYPE_BPOSIT8)
+        r0 = g.bp8_row(t, 0)
+        check("spotcheck GGUF reader: a weight row decodes into 18 blocks of 32 codes",
+              len(r0) == 18 and all(len(c) == 32 for _, c in r0))
+    if os.path.exists(real_gguf) and os.path.exists(llama_et):
+        dd = os.path.join(tmp, "csc_dump.jsonl")
+        from invar.backends import run_llamacpp
+        run_llamacpp(llama_et, real_gguf, "The capital of France is", n_predict=3, seed=1, threads=4,
+                     logits_out=dd)
+        steps = SC.read_dump(dd)
+        check("spotcheck: llama-cpp-et dump captured (>= 3 evaluations of 576/49152 floats)",
+              len(steps) >= 3 and len(steps[0][0]) == 576 and len(steps[0][1]) == 49152)
+        ok, why, n, b = SC.verify_dump(real_gguf, dd, b"unit-nonce", rows=32, max_steps=2)
+        check("spotcheck: REAL re-execution of 64 challenged rows is bit-exact", ok and n == 64 and b == 0, why)
+        # served-wrong-logits: a prover that dumps altered logits is caught by re-execution
+        lines = open(dd).read().splitlines()
+        for li, ln in enumerate(lines):
+            d = json.loads(ln)
+            if d["tensor"] == "result_output":
+                raw = bytearray(bytes.fromhex(d["hex"]))
+                rows = SC.sampled_rows(b"unit-nonce" + (0).to_bytes(4, "big"), 49152, 32)
+                raw[rows[0] * 4] ^= 0x01                  # 1-ulp change in a challenged logit
+                d["hex"] = raw.hex(); lines[li] = json.dumps(d); break
+        td = os.path.join(tmp, "csc_tamper.jsonl"); open(td, "w").write("\n".join(lines) + "\n")
+        ok, why, n, b = SC.verify_dump(real_gguf, td, b"unit-nonce", rows=32, max_steps=1)
+        check("spotcheck: 1-ulp altered served logit in a challenged row -> REJECT", not ok and b == 1, why)
+    else:
+        print("  [SKIP] spot-check real re-execution (needs llama-cpp-et build + b-posit8 GGUF)")
+
     check("AttestationBinding.none genesis == classic genesis",
           AttestationBinding.none().genesis() == Worldline.GENESIS
           and AttestationBinding.none().manifest_field() == {"kind": "none"})

@@ -51,6 +51,11 @@ def build_entry_for(backend, prompt: str, output: str, params: dict,
     comp = {"kind": "llm-decode", **dep, "params": params}
     if host_attestation and host_attestation.get("kind", "none") != "none":
         comp["host_attestation"] = host_attestation   # certified: cannot be re-homed
+    sc = getattr(backend, "spot_check_field", None)
+    if sc is not None:
+        field = sc()
+        if field:
+            comp["spot_check"] = field                # certified dump digest (CSC)
     manifest = {
         "cr": "0.1",
         "profile": backend.profile,

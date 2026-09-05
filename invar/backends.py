@@ -100,7 +100,8 @@ def gguf_file_type(path: str) -> int | None:
 # --------------------------------------------------------------------------- llama.cpp
 
 def run_llamacpp(binary: str, model: str, prompt: str,
-                 n_predict: int = 128, seed: int = 1, threads: int = 4) -> str:
+                 n_predict: int = 128, seed: int = 1, threads: int = 4,
+                 logits_out: str | None = None) -> str:
     """Deterministically-pinned llama.cpp run; returns ONLY the generated text.
 
     Uses single-turn simple-io mode (-st --simple-io) — this llama.cpp line ships
@@ -111,8 +112,12 @@ def run_llamacpp(binary: str, model: str, prompt: str,
     cmd = [binary, "-m", model, "-p", prompt, "-n", str(n_predict),
            "--temp", "0", "--seed", str(seed), "-t", str(threads),
            "-st", "--simple-io"]
+    env = dict(os.environ)
+    env.pop("INVAR_LOGITS_OUT", None)
+    if logits_out:
+        env["INVAR_LOGITS_OUT"] = logits_out       # llama-cpp-et CSC hook (see spotcheck.py)
     out = subprocess.run(cmd, capture_output=True, text=True, timeout=600,
-                         stdin=subprocess.DEVNULL)
+                         stdin=subprocess.DEVNULL, env=env)
     if out.returncode != 0:
         raise RuntimeError(f"llama.cpp failed: {out.stderr[-400:]}")
     text = out.stdout
@@ -137,8 +142,10 @@ class LlamaCppBackend:
     name = "llamacpp"
 
     def __init__(self, binary: str, model: str, threads: int = 4,
-                 profile: str | None = None):
+                 profile: str | None = None, dumps_dir: str | None = None):
         self.binary, self.model, self.threads = binary, model, threads
+        self.dumps_dir = dumps_dir            # when set (exact profile): capture CSC dumps
+        self.last_dump: str | None = None
         if profile is None:
             ft = gguf_file_type(model) if model and os.path.exists(model) else None
             profile = LLAMACPP_EXACT_PROFILE if ft == GGUF_FTYPE_BPOSIT8 else LLAMACPP_PROFILE
@@ -162,9 +169,33 @@ class LlamaCppBackend:
                 "threads": self.threads, "temp": 0}
 
     def generate(self, prompt: str, params: dict) -> str:
-        return run_llamacpp(self.binary, self.model, prompt,
+        self.last_dump = None
+        dump = None
+        if self.dumps_dir and self.profile == LLAMACPP_EXACT_PROFILE:
+            os.makedirs(self.dumps_dir, exist_ok=True)
+            import tempfile
+            fd, dump = tempfile.mkstemp(prefix="dump-", suffix=".jsonl", dir=self.dumps_dir)
+            os.close(fd)
+            os.unlink(dump)                    # the hook appends; start from nothing
+        text = run_llamacpp(self.binary, self.model, prompt,
                             params["n_predict"], params["seed"],
-                            params.get("threads", self.threads))
+                            params.get("threads", self.threads), logits_out=dump)
+        if dump and os.path.exists(dump):
+            self.last_dump = dump
+        return text
+
+    def spot_check_field(self) -> dict | None:
+        """Certified into the manifest after generate(): the dump's digest and size.
+        The verifier picks the challenge later (commit-before-challenge)."""
+        if not self.last_dump:
+            return None
+        from .spotcheck import dump_digest, read_dump
+        d = dump_digest(self.last_dump)
+        n = len(read_dump(self.last_dump))
+        final = os.path.join(self.dumps_dir, d.split(":", 1)[1] + ".jsonl")
+        os.replace(self.last_dump, final)      # content-addressed evidence file
+        self.last_dump = final
+        return {"dump_digest": d, "n_evals": n, "what": "last-row result_norm+result_output per eval"}
 
 
 # --------------------------------------------------------------------------- Ollama

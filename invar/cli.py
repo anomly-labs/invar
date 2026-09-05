@@ -72,6 +72,11 @@ def main():
                    help="accept only signatures from this key_id (repeatable)")
     v.add_argument("--require-signature", action="store_true",
                    help="unsigned entries REJECT")
+    v.add_argument("--spot-check", action="store_true",
+                   help="exact-profile entries with a certified dump: re-execute challenged "
+                        "lm_head rows from the pinned GGUF (needs --model)")
+    v.add_argument("--rows", type=int, default=256, help="challenged rows per evaluation")
+    v.add_argument("--nonce", default=None, help="challenge nonce hex (default: fresh random)")
     at = sub.add_parser("attest", help="attestation bindings")
     ats = at.add_subparsers(dest="acmd", required=True)
     ab = ats.add_parser("bind", help="create a binding from platform evidence")
@@ -230,6 +235,34 @@ def main():
                              binding=binding,
                              trusted_key_ids=set(a.trust_key) if a.trust_key else None,
                              require_signature=a.require_signature)
+    if a.spot_check:
+        import secrets
+        from .spotcheck import dump_digest, verify_dump
+        if not a.model:
+            print("--spot-check needs --model <gguf>", file=sys.stderr)
+            sys.exit(2)
+        nonce = bytes.fromhex(a.nonce) if a.nonce else secrets.token_bytes(16)
+        print(f"spot-check nonce {nonce.hex()} rows/eval {a.rows}")
+        dumps_dir = a.worldline + ".dumps"
+        entries = [json.loads(l) for l in open(a.worldline)]
+        new_results = []
+        for (i, ok, why), e in zip(results, entries):
+            sc = e["manifest"].get("computation", {}).get("spot_check")
+            if ok and sc:
+                path = os.path.join(dumps_dir, sc["dump_digest"].split(":", 1)[1] + ".jsonl")
+                if not os.path.exists(path):
+                    ok, why = False, "spot-check dump missing"
+                elif dump_digest(path) != sc["dump_digest"]:
+                    ok, why = False, "spot-check dump digest differs from certified"
+                else:
+                    sok, swhy, _, _ = verify_dump(a.model, path, nonce + i.to_bytes(4, "big"), a.rows)
+                    ok = ok and sok
+                    why += "; spot-check: " + swhy
+            elif ok and e["manifest"].get("profile") == LLAMACPP_EXACT_PROFILE:
+                why += "; spot-check: no dump certified for this entry"
+            new_results.append((i, ok, why))
+        results = new_results
+
     bad = 0
     for i, ok, why in results:
         print(f"entry {i}: {'ACCEPT' if ok else 'REJECT'} — {why}")

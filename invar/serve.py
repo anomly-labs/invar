@@ -250,11 +250,19 @@ def main():
     ap.add_argument("--state-dir", default=os.environ.get("INVAR_STATE",
                     os.path.expanduser("~/.invar")),
                     help="where signing keys / TPM contexts live")
+    ap.add_argument("--spot-check", action="store_true",
+                    help="exact profile only: keep a per-request logits dump (content-addressed, "
+                         "beside the worldline) and certify its digest so a client can "
+                         "re-execute challenged lm_head rows (docs/SPOT-CHECK.md)")
     ap.add_argument("--attest", default=os.environ.get("INVAR_ATTEST"),
                     help="attestation binding JSON (invar attest bind ...): genesis and "
                          "every receipt commit to the platform evidence")
     a = ap.parse_args()
     backend = backend_from_args(a, a.model)
+    if a.spot_check:
+        if getattr(backend, "profile", "") != "llamacpp-bposit8-quire-v0":
+            ap.error("--spot-check needs the exact profile (a b-posit8 GGUF on llama-cpp-et)")
+        backend.dumps_dir = a.worldline + ".dumps"
     dep = backend.deployment()          # fail fast: unreachable server / missing model
     os.makedirs(a.state_dir, mode=0o700, exist_ok=True)
     signer = make_signer(a.signer, a.state_dir)

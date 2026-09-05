@@ -74,6 +74,11 @@ trusts only pinned digests and the certificate math.
   sampler, tokenizer, or prompt template cross-implementation; those are pinned by the
   runtime digest as before. Quality is the 8-bit tier (see the mosyne-bposit
   whitepaper limits), not a bf16 substitute.
+- R13 Spot-check dumps (`--spot-check`) contain plaintext hidden states and logits of
+  the served positions, stored beside the worldline. They are evidence for the client
+  and operator; keep them under the same access control as the prompts. Only their
+  digest enters the receipt. Rows that were not challenged are not attested (CR §10);
+  a prover cannot predict the challenge because it is drawn at verify time.
 - R10 Attestation binding verifies nothing about the evidence itself: INVAR records
   the digests of the evidence and of an external verifier's verdict (snpguest,
   nvtrust/NRAS, Veraison...) and binds the chain to them. If the operator ran no
