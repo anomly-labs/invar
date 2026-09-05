@@ -1372,6 +1372,17 @@ def sec_hwsign_attest(tmp, art):
                     SC.LUT_M[c] == 0 for c, (k, M, E) in enumerate(lut) if int(k) != 0)
         check("spotcheck codec: all 256 code values equal the rational golden LUT (M*2^E exact)",
               len(lut) == 256 and agree)
+    import random as _rnd
+    _rnd.seed(7)
+    pts = [0.0, 1.0, -1.0, 1e-9, -1e-9, 3.0, 65536.0, -65536.0, 1e30, -1e30]
+    for c in range(256):                            # every code value, and exact midpoints
+        if c != SC.NAR:
+            pts.append(SC.VAL[c])
+    vs = sorted(set(SC.VAL[c] for c in range(256) if c != SC.NAR))
+    pts += [(a + b) / 2 for a, b in zip(vs, vs[1:])]
+    pts += [_rnd.uniform(-40, 40) for _ in range(20000)] + [_rnd.uniform(-1e-6, 1e-6) for _ in range(2000)]
+    check("spotcheck: bisect encoder == reference linear scan on 22k points incl. all midpoints/ties",
+          all(SC.encode_nearest(v) == SC.encode_nearest_linear(v) for v in pts))
     real_gguf = os.path.expanduser("~/development/hackathon-artifacts/SmolLM2-135M-Instruct-bposit8.gguf")
     llama_et = os.path.expanduser("~/development/llama-cpp-et/build/bin/llama-cli")
     if os.path.exists(real_gguf):
@@ -1404,6 +1415,17 @@ def sec_hwsign_attest(tmp, art):
         td = os.path.join(tmp, "csc_tamper.jsonl"); open(td, "w").write("\n".join(lines) + "\n")
         ok, why, n, b = SC.verify_dump(real_gguf, td, b"unit-nonce", rows=32, max_steps=1)
         check("spotcheck: 1-ulp altered served logit in a challenged row -> REJECT", not ok and b == 1, why)
+        # retention: serve keeps only the newest N dumps
+        from invar.backends import LlamaCppBackend as _LB
+        dd_dir = os.path.join(tmp, "dumps_keep")
+        be_k = _LB(llama_et, real_gguf, dumps_dir=dd_dir, dumps_keep=2)
+        wl_k = Worldline(os.path.join(tmp, "keep_wl.jsonl"))
+        for q in ("a", "b", "c"):
+            wl_k.infer(be_k, q, n_predict=2)
+        kept = [f for f in os.listdir(dd_dir) if f.endswith(".jsonl")]
+        check("spot-check retention: 3 requests with keep=2 -> 2 dumps on disk, all receipts certified",
+              len(kept) == 2 and all("spot_check" in json.loads(l)["manifest"]["computation"]
+                                     for l in open(wl_k.path)))
     else:
         print("  [SKIP] spot-check real re-execution (needs llama-cpp-et build + b-posit8 GGUF)")
 

@@ -142,9 +142,11 @@ class LlamaCppBackend:
     name = "llamacpp"
 
     def __init__(self, binary: str, model: str, threads: int = 4,
-                 profile: str | None = None, dumps_dir: str | None = None):
+                 profile: str | None = None, dumps_dir: str | None = None,
+                 dumps_keep: int = 1000):
         self.binary, self.model, self.threads = binary, model, threads
         self.dumps_dir = dumps_dir            # when set (exact profile): capture CSC dumps
+        self.dumps_keep = dumps_keep          # retention: oldest dumps beyond this are removed
         self.last_dump: str | None = None
         if profile is None:
             ft = gguf_file_type(model) if model and os.path.exists(model) else None
@@ -195,7 +197,22 @@ class LlamaCppBackend:
         final = os.path.join(self.dumps_dir, d.split(":", 1)[1] + ".jsonl")
         os.replace(self.last_dump, final)      # content-addressed evidence file
         self.last_dump = final
+        self._prune_dumps()
         return {"dump_digest": d, "n_evals": n, "what": "last-row result_norm+result_output per eval"}
+
+    def _prune_dumps(self) -> None:
+        """Keep the newest `dumps_keep` dumps. A pruned dump makes its receipt's spot-check
+        'dump missing' (structure + re-execution still verify); the digest stays certified."""
+        if not self.dumps_keep or self.dumps_keep < 0:
+            return
+        try:
+            files = [os.path.join(self.dumps_dir, f) for f in os.listdir(self.dumps_dir)
+                     if f.endswith(".jsonl") and not f.startswith("dump-")]
+            files.sort(key=os.path.getmtime)
+            for old in files[:-self.dumps_keep] if len(files) > self.dumps_keep else []:
+                os.unlink(old)
+        except OSError:
+            pass
 
 
 # --------------------------------------------------------------------------- Ollama

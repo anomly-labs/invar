@@ -72,7 +72,34 @@ for _c in range(256):
     VAL[_c] = LUT_M[_c] * math.ldexp(1.0, LUT_E[_c])
 
 
+# sorted value table for the nearest-code search (OpenEvolve spotcheck_speed, 2026-09-05:
+# bisect + neighbour check with ties to the lowest code, 1.17x over the linear scan under
+# a bit-exact gate on real model data). Values are unique per finite code.
+_VAL_SORTED = sorted(((VAL[c], c) for c in range(256) if c != NAR), key=lambda t: t[0])
+_VAL_SORTED_VALUES = [v for v, _ in _VAL_SORTED]
+
+
 def encode_nearest(x: float) -> int:
+    if x == 0.0:
+        return ZERO
+    import bisect
+    pos = bisect.bisect_left(_VAL_SORTED_VALUES, x)
+    best, bestd = ZERO, math.inf
+    for k in (pos - 1, pos, pos + 1):
+        if 0 <= k < len(_VAL_SORTED):
+            val, code = _VAL_SORTED[k]
+            d = abs(val - x)
+            if d < bestd or (d == bestd and code < best):
+                bestd, best = d, code
+    if bestd >= abs(x):
+        # double absorption (|x| >> every code value): many codes tie at distance |x| and
+        # the reference linear scan returns the lowest such code (0). Fall back to it.
+        return encode_nearest_linear(x)
+    return best
+
+
+def encode_nearest_linear(x: float) -> int:
+    """The reference linear scan (kept for tests: must agree with encode_nearest)."""
     if x == 0.0:
         return ZERO
     best, bestd = ZERO, math.inf
@@ -108,13 +135,18 @@ def quantize_row(x: list[float]) -> list[tuple[int, list[int]]]:
 def exact_dot(xblocks, yblocks) -> float:
     """Exact fixed-point accumulation (Python ints) + the kernel's readout rounding."""
     acc = 0
+    lut_m, lut_e, qfrac = LUT_M, LUT_E, QFRAC
     for (sx, xq), (sy, yq) in zip(xblocks, yblocks):
-        se = sx + sy + QFRAC
-        for j in range(QK):
-            P = LUT_M[xq[j]] * LUT_M[yq[j]]
-            if P == 0:
+        se = sx + sy + qfrac
+        for x_code, y_code in zip(xq, yq):
+            m_x = lut_m[x_code]
+            if m_x == 0:
                 continue
-            shift = LUT_E[xq[j]] + LUT_E[yq[j]] + se
+            m_y = lut_m[y_code]
+            if m_y == 0:
+                continue
+            shift = lut_e[x_code] + lut_e[y_code] + se
+            P = m_x * m_y
             acc += (P << shift) if shift >= 0 else (P >> (-shift))
     acc &= (1 << 256) - 1
     neg = (acc >> 255) & 1

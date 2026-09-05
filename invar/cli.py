@@ -20,6 +20,8 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
+import subprocess
 import sys
 
 from .attest import AttestationBinding
@@ -255,7 +257,15 @@ def main():
                 elif dump_digest(path) != sc["dump_digest"]:
                     ok, why = False, "spot-check dump digest differs from certified"
                 else:
-                    sok, swhy, _, _ = verify_dump(a.model, path, nonce + i.to_bytes(4, "big"), a.rows)
+                    gobin = os.environ.get("INVAR_SPOTCHECK_BIN") or shutil.which("invar-spotcheck")
+                    if gobin:                       # Go implementation, ~70x faster, same math
+                        r = subprocess.run([gobin, "-gguf", a.model, "-dump", path, "-rows", str(a.rows),
+                                            "-nonce", (nonce + i.to_bytes(4, "big")).hex()],
+                                           capture_output=True, text=True, timeout=600)
+                        sok = r.returncode == 0
+                        swhy = (r.stdout.strip().splitlines() or ["(no output)"])[0].split("— ", 1)[-1] + " [go]"
+                    else:
+                        sok, swhy, _, _ = verify_dump(a.model, path, nonce + i.to_bytes(4, "big"), a.rows)
                     ok = ok and sok
                     why += "; spot-check: " + swhy
             elif ok and e["manifest"].get("profile") == LLAMACPP_EXACT_PROFILE:
