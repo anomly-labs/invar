@@ -130,6 +130,8 @@ def _accumulate(P: np.ndarray, SH: np.ndarray, n_out: int) -> np.ndarray:
     P = P.reshape(n_out, -1)
     SH = SH.reshape(n_out, -1)
     nz = P != 0
+    if not nz.any():                                                       # every product zero (zero rows / zero input)
+        return np.zeros(n_out, dtype=np.float32)
     rows = np.broadcast_to(np.arange(n_out, dtype=np.int64)[:, None], P.shape)[nz]
     p = P[nz]
     sh = SH[nz]
