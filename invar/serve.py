@@ -180,6 +180,16 @@ def make_handler(wl: Worldline, binary: str | None = None,
                            "chain": entry["chain"],
                            "profile": profile,
                            "manifest": entry["manifest"]}
+                if entry.get("signature"):
+                    # OpenPCC-shaped evidence piece: {Type, Data, Signature}. Data is the
+                    # entry JSON (certified manifest + certificate + chain) and Signature is
+                    # the device key's signature over the chain digest; a client verifies it
+                    # with go/crverify VerifyExecutionReceipt against the node's attestation.
+                    receipt["openpcc"] = {
+                        "type": "ExecutionReceipt",
+                        "data": json.dumps({k: entry[k] for k in ("manifest", "certificate", "chain")},
+                                           separators=(",", ":"), sort_keys=True),
+                        "signature": entry["signature"]}
                 rid = "chatcmpl-" + uuid.uuid4().hex[:24]
                 now = int(time.time())
                 usage = {"prompt_tokens": _approx_tokens(prompt),

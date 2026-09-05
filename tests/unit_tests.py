@@ -1225,6 +1225,31 @@ def sec_hwsign_attest(tmp, art):
     if os.path.exists(real):
         check("REAL b-posit8 GGUF (llama-cpp-et) sniffs as file_type 42", gguf_file_type(real) == 42)
 
+    # -- OpenPCC-shaped ExecutionReceipt envelope on signed responses
+    swl2 = Worldline(os.path.join(tmp, "openpcc_wl.jsonl"), signer=s1)
+    srv2 = ThreadingHTTPServer(("127.0.0.1", 0), serve_handler(swl2, binA, model))
+    p2 = serve_bg(srv2)
+    st2, r2 = http("POST", f"http://127.0.0.1:{p2}/v1/chat/completions",
+                   {"messages": [{"role": "user", "content": "envelope"}], "max_tokens": 4},
+                   {"Content-Type": "application/json"})
+    env_ = r2.get("receipt", {}).get("openpcc", {})
+    data = json.loads(env_.get("data", "{}"))
+    check("serve: signed responses carry an OpenPCC-shaped ExecutionReceipt envelope",
+          st2 == 200 and env_.get("type") == "ExecutionReceipt"
+          and data.get("certificate") == r2["receipt"]["certificate"]
+          and certificate_of(data["manifest"]) == data["certificate"]
+          and env_["signature"]["key_id"] == s1.key_id)
+    check("serve: envelope data is canonical (re-canonicalises to itself)",
+          json.dumps(data, separators=(",", ":"), sort_keys=True) == env_["data"])
+    srv2.shutdown()
+    unsigned_srv = ThreadingHTTPServer(("127.0.0.1", 0), serve_handler(Worldline(os.path.join(tmp, "nosig.jsonl")), binA, model))
+    p3 = serve_bg(unsigned_srv)
+    _, r3 = http("POST", f"http://127.0.0.1:{p3}/v1/chat/completions",
+                 {"messages": [{"role": "user", "content": "x"}], "max_tokens": 4}, {"Content-Type": "application/json"})
+    check("serve: unsigned worldline -> no envelope (nothing to bind a node key to)",
+          "openpcc" not in r3.get("receipt", {}))
+    unsigned_srv.shutdown()
+
     # -- SCITT signed statements (COSE_Sign1) over entries + Ledger export format=scitt
     from invar.scitt import (signed_statement, verify_statement, statements_for_worldline,
                              cbor, cbor_decode, Tag, CONTENT_TYPE)
