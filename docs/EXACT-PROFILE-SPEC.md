@@ -1,6 +1,6 @@
 Copyright (c) 2026 Anomly, Inc. All rights reserved. Author: Ry Bruscoe.
 
-# The exact profile, as a specification (`llamacpp-bposit8-quire-v0`, draft 1.4)
+# The exact profile, as a specification (`llamacpp-bposit8-quire-v0`, draft 1.5)
 
 This document defines the arithmetic of the exact profile precisely enough that an
 implementation written from it, in any language on any IEEE-754 machine, produces the
@@ -153,8 +153,10 @@ vocabularies with the `smollm`, `gpt2`, `llama-bpe` or `qwen2` pre-tokeniser the
 defined: render the GGUF chat template with jinja2 semantics for the user message and
 `add_generation_prompt`, match control and user-defined tokens literally longest-first,
 split with llama.cpp's regexes for that pre-tokeniser, byte-level encode, merge by rank,
-prepend BOS once when `add_bos_token`; for `llama` (sentencepiece) vocabularies: spaces to
-U+2581, one symbol per code point, greedy merges of adjacent symbols whose concatenation is a
+prepend BOS once when `add_bos_token`; for `llama` (sentencepiece) vocabularies: when
+`add_space_prefix`, a space is prepended to every text fragment that starts the input or
+follows a special token (even if it already begins with one); spaces to U+2581, one symbol
+per code point, greedy merges of adjacent symbols whose concatenation is a
 vocabulary token in descending token-score order with ties to the leftmost, byte-fallback
 tokens `<0xXX>` for unmatched pieces; the token ids remain certified through the dump digest
 in every case),

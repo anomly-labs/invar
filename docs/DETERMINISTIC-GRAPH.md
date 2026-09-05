@@ -194,7 +194,10 @@ Qwen2.5 (43) and Llama-3.2 (49, including the dated system prompt). `invar verif
 now reports whether the certified prompt text re-tokenises to the certified ids, using the
 receipt's timestamp for date-dependent templates. Gemma's sentencepiece vocabulary is covered
 too (llama.cpp's greedy score-driven merges with byte fallback): Gemma-3's 21 prompt ids
-reproduced. All four families re-tokenise identically to the runtime.
+reproduced, and Mistral-7B's 22 (sentencepiece with the space prefix, which llama.cpp applies to
+a fragment at the start or right after a special token). All five models re-tokenise
+identically to the runtime; the published vectors (`go/crverify/testdata/tokenizer-vectors.json`)
+carry each prompt and its ids.
 
 ## Scope and limits
 

@@ -234,15 +234,16 @@ class SPMTokenizer:
 
     def encode(self, text: str, add_bos: bool | None = None) -> list[int]:
         ids: list[int] = []
-        first = True
-        for is_special, chunk in self._split_specials(text):
+        prev_special = True                              # llama.cpp: a fragment at the start or right after a
+        for is_special, chunk in self._split_specials(text):   # special token gets the space prefix, always
             if is_special:
                 ids.append(self.id_of[chunk])
+                prev_special = True
             else:
-                if first and self.add_space_prefix and not chunk.startswith(" "):
+                if self.add_space_prefix and prev_special:
                     chunk = " " + chunk
                 ids += self._spm(chunk)
-            first = False
+                prev_special = False
         want_bos = self.add_bos if add_bos is None else add_bos
         if want_bos and self.bos_id >= 0 and (not ids or ids[0] != self.bos_id):
             ids.insert(0, self.bos_id)

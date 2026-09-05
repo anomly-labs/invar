@@ -219,6 +219,44 @@
     4368,
     107
    ]
+  },
+  {
+   "model": "Mistral-7B-Instruct-v0.3",
+   "pre_tokenizer": "spm",
+   "gguf_first_mib_sha256": "14aa56c4a194b289f499f34ef9530c0255a8aeb004058c0f9abe28bd88bc9044",
+   "prompt": "Explain in two sentences why exact accumulation matters for reproducible inference.",
+   "template_date": "2026-09-05",
+   "messages": [
+    {
+     "role": "user",
+     "content": "Explain in two sentences why exact accumulation matters for reproducible inference."
+    }
+   ],
+   "add_generation_prompt": true,
+   "ids": [
+    1,
+    3,
+    29473,
+    14470,
+    1194,
+    1065,
+    1757,
+    24516,
+    2847,
+    4227,
+    15109,
+    3445,
+    10528,
+    1122,
+    1080,
+    1497,
+    6782,
+    1838,
+    1065,
+    2871,
+    29491,
+    4
+   ]
   }
  ]
 }
