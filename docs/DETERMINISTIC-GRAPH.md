@@ -144,7 +144,8 @@ the reference greedy chain either way.
 SmolLM2-1.7B in b-posit8 (converted tonight) decodes at 7 tok/s exact on 16 CPU threads;
 its dumps are byte-identical across the two x86 binaries too.
 
-So the exact profile is no longer defined by a binary. Two independent implementations,
+So the exact profile is no longer defined by a binary; EXACT-PROFILE-SPEC.md writes it down
+as a specification a fourth implementation can be built from. Two independent implementations,
 in different languages, on CPUs of two architectures and on a GPU, produce the same bits
 from the same weights and tokens. What is still the runtime's: tokenisation (the token
 ids come from the dump), the model architecture (llama-family graphs), and the sampling
