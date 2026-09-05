@@ -1549,6 +1549,76 @@ def sec_hwsign_attest(tmp, art):
           and AttestationBinding.none().manifest_field() == {"kind": "none"})
 
 
+def sec_device_pin(tmp, art):
+    """llama.cpp device / n_gpu_layers are part of the deployment pin: the float
+    elementwise ops differ between CPU and GPU, so a receipt minted on CUDA0 must not
+    re-execute as ACCEPT on the CPU (or on another device), and vice versa."""
+    from invar.backends import LlamaCppBackend, llamacpp_device_desc
+    import invar.cli as CLI
+    print("\n[device pin]")
+    binA, model = art["binA"], art["model"]
+
+    def run_cli(argv):
+        old = sys.argv[:]
+        sys.argv = argv
+        buf = io.StringIO()
+        code = 0
+        try:
+            with redirect_stdout(buf):
+                CLI.main()
+        except SystemExit as e:
+            code = e.code or 0
+        finally:
+            sys.argv = old
+        return code, buf.getvalue()
+
+    check("device desc: none -> 'none'", llamacpp_device_desc(binA, "none") == "none")
+    check("device desc: --list-devices line without the memory parenthetical",
+          llamacpp_device_desc(binA, "CUDA0") == "CUDA0: Fake GPU 9000")
+    bad = False
+    try:
+        llamacpp_device_desc(binA, "CUDA7")
+    except RuntimeError:
+        bad = True
+    check("device desc: unknown device id is an error, never silently CPU", bad)
+    legacy = LlamaCppBackend(binA, model)
+    check("legacy backend (no device given): deployment unchanged (no device keys)",
+          "device" not in legacy.deployment() and "n_gpu_layers" not in legacy.deployment())
+    gpu = LlamaCppBackend(binA, model, device="CUDA0", n_gpu_layers=99)
+    cpu = LlamaCppBackend(binA, model, device="none", n_gpu_layers=0)
+    dg = gpu.deployment()
+    check("GPU backend: deployment certifies device + n_gpu_layers",
+          dg["device"] == "CUDA0: Fake GPU 9000" and dg["n_gpu_layers"] == 99)
+    wl = Worldline(os.path.join(tmp, "device_wl.jsonl"))
+    wl.infer(gpu, "device pin", n_predict=4)
+    pr = {digest_bytes(b"device pin"): "device pin"}
+    m = json.loads(open(wl.path).readline())["manifest"]
+    check("manifest carries the device pin", m["computation"]["device"] == "CUDA0: Fake GPU 9000"
+          and m["computation"]["n_gpu_layers"] == 99)
+    res = verify_entries(wl.path, pr, {LLAMACPP_PROFILE: gpu})
+    check("same device + ngl: re-executed ACCEPT", res[0][1] and "re-executed" in res[0][2])
+    res = verify_entries(wl.path, pr, {LLAMACPP_PROFILE: cpu})
+    check("GPU receipt verified on CPU backend: REJECT deployment differs (device)",
+          not res[0][1] and "device" in res[0][2])
+    res = verify_entries(wl.path, pr, {LLAMACPP_PROFILE: LlamaCppBackend(binA, model, device="CUDA0", n_gpu_layers=10)})
+    check("same device, different n_gpu_layers: REJECT", not res[0][1] and "n_gpu_layers" in res[0][2])
+    res = verify_entries(wl.path, pr, {LLAMACPP_PROFILE: legacy})
+    check("GPU receipt verified by a legacy (unpinned) backend: REJECT, the pin is not optional",
+          not res[0][1] and "device" in res[0][2])
+    wl2 = Worldline(os.path.join(tmp, "device_wl_legacy.jsonl"))
+    wl2.infer(legacy, "device pin", n_predict=4)
+    res = verify_entries(wl2.path, pr, {LLAMACPP_PROFILE: gpu})
+    check("legacy receipt (no device key) verified by a pinned backend: ACCEPT (old manifests stay valid)",
+          res[0][1])
+    # the CLI threads the flags through to the verifier backend
+    code, out = run_cli(["invar", "verify", wl.path, "--binary", binA, "--model", model,
+                         "--device", "CUDA0", "--ngl", "99"])
+    check("cli verify --device/--ngl: ACCEPT on the matching deployment", code == 0 and "ACCEPT" in out)
+    code, out = run_cli(["invar", "verify", wl.path, "--binary", binA, "--model", model,
+                         "--device", "none", "--ngl", "0"])
+    check("cli verify --device none on a GPU worldline: REJECT", code == 1)
+
+
 def main():
     tmp = tempfile.mkdtemp(prefix="invar-unit-")
     try:
@@ -1562,6 +1632,7 @@ def main():
         sec_webhook(tmp, lic)
         sec_ollama(tmp, art)
         sec_hwsign_attest(tmp, art)
+        sec_device_pin(tmp, art)
     finally:
         import shutil
         shutil.rmtree(tmp, ignore_errors=True)

@@ -195,6 +195,21 @@ curl -s localhost:8577/v1/chat/completions -H 'Content-Type: application/json' \
 
 ---
 
+## llama.cpp on a GPU (CUDA)
+
+```
+invar serve --model model-bposit8.gguf --binary llama-cli --device CUDA0 --ngl 99 --spot-check --spot-check-units
+invar verify worldline.jsonl --binary llama-cli --model model-bposit8.gguf --device CUDA0 --ngl 99 --spot-check --units
+```
+
+The compute device and the number of offloaded layers are part of the deployment pin
+(`device`, `n_gpu_layers` in the manifest): a receipt minted on CUDA0 does not
+re-execute as ACCEPT on the CPU, because the float elementwise ops differ between the
+two, while every matmul under the exact profile is re-executable from either dump. Use
+`--device none` to pin a CPU-only run on a machine that has a GPU; with a CUDA build
+and no `--device`, llama.cpp may offload batched prefill ops on its own, which is a
+deployment property you did not pin.
+
 ## What every client gets, and what none of them get
 
 Every answer through any of these clients is pinned to the runtime, weights,

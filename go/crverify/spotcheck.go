@@ -127,22 +127,7 @@ func QuantizeRow(x []float32) ([]Block, error) {
 	}
 	out := make([]Block, len(x)/bp8QK)
 	for i := range out {
-		sumsq := 0.0
-		for j := 0; j < bp8QK; j++ {
-			v := float64(x[i*bp8QK+j])
-			sumsq += v * v
-		}
-		rms := math.Sqrt(sumsq / bp8QK)
-		se := 0
-		if rms > 0 {
-			se = int(math.RoundToEven(math.Log2(rms)))
-			if se > 127 {
-				se = 127
-			}
-			if se < -128 {
-				se = -128
-			}
-		}
+		se, _ := bp8ScaleExpExact(x[i*bp8QK : (i+1)*bp8QK])
 		inv := math.Ldexp(1, -se)
 		out[i].Scale = int8(se)
 		for j := 0; j < bp8QK; j++ {
@@ -570,4 +555,59 @@ func VerifyDump(g *GGUF, evals []Eval, nonce []byte, rows int) SpotResult {
 		res.Why = fmt.Sprintf("%d challenged lm_head rows re-executed bit-exactly over %d evaluations", res.Checked, len(evals))
 	}
 	return res
+}
+
+// bp8ScaleExpExact mirrors ggml_bp8_scale_exp_exact: se = round_half_even(log2(sqrt(S/32)))
+// with S the EXACT sum of squares as a big integer (float32 squares are exact in float64;
+// each is mantissa * 2^(e-52), placed at bit e-52+352). floor(log2(S/32)) is the top bit;
+// a tie is S a power of two. No libm, no FMA contraction, no summation order.
+func bp8ScaleExpExact(blk []float32) (int, bool) {
+	S := new(big.Int)
+	any := false
+	for _, f := range blk {
+		v := float64(f)
+		if v == 0 {
+			continue
+		}
+		if math.IsInf(v, 0) || math.IsNaN(v) {
+			return 0, true
+		}
+		any = true
+		p := float64(v * v) // explicit conversion forbids FMA fusion (Go spec); exact anyway
+		bits := math.Float64bits(p)
+		mi := (bits & 0xFFFFFFFFFFFFF) | (1 << 52)
+		e2 := int((bits>>52)&0x7FF) - 1023
+		pos := e2 - 52 + 352
+		t := new(big.Int).SetUint64(mi)
+		t.Lsh(t, uint(pos))
+		S.Add(S, t)
+	}
+	if !any {
+		return 0, false
+	}
+	top := S.BitLen() - 1
+	tie := int(S.TrailingZeroBits()) == top
+	E := top - 352 - 5
+	var se int
+	if E&1 == 0 {
+		se = E / 2
+	} else {
+		n := (E - 1) / 2
+		if tie {
+			if n&1 == 0 {
+				se = n
+			} else {
+				se = n + 1
+			}
+		} else {
+			se = n + 1
+		}
+	}
+	if se > 127 {
+		se = 127
+	}
+	if se < -128 {
+		se = -128
+	}
+	return se, true
 }

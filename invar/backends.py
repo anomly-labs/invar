@@ -99,10 +99,35 @@ def gguf_file_type(path: str) -> int | None:
 
 # --------------------------------------------------------------------------- llama.cpp
 
+_DEVICE_DESC: dict[tuple[str, str], str] = {}
+
+
+def llamacpp_device_desc(binary: str, device: str) -> str:
+    """Stable description of a llama.cpp compute device for the deployment pin:
+    "none" for CPU-only, else the `--list-devices` line for that id without its
+    free-memory parenthetical (e.g. "CUDA0: NVIDIA GeForce RTX 5090"). The float
+    elementwise ops (norm, RoPE, SiLU, softmax) are deployment-pinned, and a GPU is a
+    different deployment from the CPU, so the device is part of the pin."""
+    if device in (None, "", "none"):
+        return "none"
+    key = (binary, device)
+    if key in _DEVICE_DESC:
+        return _DEVICE_DESC[key]
+    out = subprocess.run([binary, "--list-devices"], capture_output=True, text=True,
+                         timeout=120, stdin=subprocess.DEVNULL)
+    for line in (out.stdout + out.stderr).splitlines():
+        t = line.strip()
+        if t.startswith(device + ":"):
+            desc = t.split(" (", 1)[0].strip()
+            _DEVICE_DESC[key] = desc
+            return desc
+    raise RuntimeError(f"llama.cpp device {device!r} not listed by {binary} --list-devices")
+
 def run_llamacpp(binary: str, model: str, prompt: str,
                  n_predict: int = 128, seed: int = 1, threads: int = 4,
                  logits_out: str | None = None, logits_layers: bool = False,
-                 logits_matmuls: bool = False) -> str:
+                 logits_matmuls: bool = False, device: str | None = None,
+                 n_gpu_layers: int | None = None) -> str:
     """Deterministically-pinned llama.cpp run; returns ONLY the generated text.
 
     Uses single-turn simple-io mode (-st --simple-io) — this llama.cpp line ships
@@ -113,6 +138,10 @@ def run_llamacpp(binary: str, model: str, prompt: str,
     cmd = [binary, "-m", model, "-p", prompt, "-n", str(n_predict),
            "--temp", "0", "--seed", str(seed), "-t", str(threads),
            "-st", "--simple-io"]
+    if device is not None:
+        cmd += ["--device", device]           # "none" = CPU only, else e.g. CUDA0
+    if n_gpu_layers is not None:
+        cmd += ["-ngl", str(n_gpu_layers)]
     env = dict(os.environ)
     env.pop("INVAR_LOGITS_OUT", None)
     if logits_out:
@@ -148,8 +177,11 @@ class LlamaCppBackend:
 
     def __init__(self, binary: str, model: str, threads: int = 4,
                  profile: str | None = None, dumps_dir: str | None = None,
-                 dumps_keep: int = 1000):
+                 dumps_keep: int = 1000, device: str | None = None,
+                 n_gpu_layers: int | None = None):
         self.binary, self.model, self.threads = binary, model, threads
+        self.device = device                  # None = binary default (unpinned, legacy)
+        self.n_gpu_layers = n_gpu_layers
         self.dumps_dir = dumps_dir            # when set (exact profile): capture CSC dumps
         self.dumps_keep = dumps_keep          # retention: oldest dumps beyond this are removed
         self.dump_units = False               # also capture per-matmul units (INVAR_LOGITS_MATMULS)
@@ -170,6 +202,10 @@ class LlamaCppBackend:
              "model_name": self.model_name}
         if self.file_type is not None:
             d["gguf_file_type"] = self.file_type
+        if self.device is not None:
+            d["device"] = llamacpp_device_desc(self.binary, self.device)
+        if self.n_gpu_layers is not None:
+            d["n_gpu_layers"] = self.n_gpu_layers
         return d
 
     def params(self, n_predict: int, seed: int) -> dict:
@@ -188,7 +224,8 @@ class LlamaCppBackend:
         text = run_llamacpp(self.binary, self.model, prompt,
                             params["n_predict"], params["seed"],
                             params.get("threads", self.threads), logits_out=dump,
-                            logits_matmuls=self.dump_units)
+                            logits_matmuls=self.dump_units, device=self.device,
+                            n_gpu_layers=self.n_gpu_layers)
         if dump and os.path.exists(dump):
             self.last_dump = dump
         return text
@@ -345,7 +382,8 @@ def looks_like_ollama_tag(model: str) -> bool:
 
 def make_backend(kind: str, model: str, *, binary: str | None = None,
                  host: str | None = None, threads: int = 4,
-                 num_ctx: int = 2048, num_gpu: int | None = None):
+                 num_ctx: int = 2048, num_gpu: int | None = None,
+                 device: str | None = None, n_gpu_layers: int | None = None):
     if kind == "auto":
         kind = "ollama" if looks_like_ollama_tag(model) else "llamacpp"
     if kind == "ollama":
@@ -354,7 +392,8 @@ def make_backend(kind: str, model: str, *, binary: str | None = None,
     if kind == "llamacpp":
         return LlamaCppBackend(binary or os.environ.get("INVAR_LLAMA_BIN")
                                or shutil.which("llama-cli") or "llama-cli",
-                               model, threads=threads)
+                               model, threads=threads, device=device,
+                               n_gpu_layers=n_gpu_layers)
     raise ValueError(f"unknown backend {kind!r}")
 
 

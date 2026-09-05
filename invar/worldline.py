@@ -41,7 +41,7 @@ run_inference = run_llamacpp        # back-compat alias (tests, external callers
 # deployment keys a verifier compares against the live backend; anything else
 # under `computation` (model_name, runtime_version, runtime_pinned_by) is
 # descriptive and certified but not a re-execution precondition
-PIN_KEYS = ("runtime_digest", "model_digest", "weights_digest")
+PIN_KEYS = ("runtime_digest", "model_digest", "weights_digest", "device", "n_gpu_layers")
 
 
 def build_entry_for(backend, prompt: str, output: str, params: dict,

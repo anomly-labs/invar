@@ -105,11 +105,13 @@ gatekeep. One page on what each layer proves and what none of them do:
 
 ## What the exact profile costs
 
-Honest number, same binary, 4 CPU threads, SmolLM2-135M: q8_0 decodes at roughly 350–430
-tokens/s, F32 at ~97, the exact b-posit8 quire path at ~33. About 11× against q8_0 on a
-CPU today, because the exact path is scalar while q8_0 is SIMD. Use it where the
-guarantee is worth more than the throughput: small models, audit re-execution, and the
-spot-checks below, where 33 tokens/s is plenty.
+Honest numbers, same binary, SmolLM2-135M. CPU, 4 threads: q8_0 decodes at roughly
+350–430 tokens/s, F32 at ~97, the exact b-posit8 quire path at ~33 (about 11× against
+q8_0, because the exact path is scalar while q8_0 is SIMD). RTX 5090 with the CUDA
+exact kernel: q8_0 ~1,160 tokens/s, exact ~114 (10×, launch-bound at this size), every
+matmul re-executed bit-exactly by the CPU-side verifiers. Use it where the guarantee is
+worth more than the throughput: small models, audit re-execution, and the spot-checks
+below, where 100 tokens/s is plenty.
 
 ## Check the arithmetic yourself
 

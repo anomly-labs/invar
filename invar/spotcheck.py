@@ -113,23 +113,47 @@ def encode_nearest_linear(x: float) -> int:
 
 
 def quantize_row(x: list[float]) -> list[tuple[int, list[int]]]:
-    """ggml's quantize_row_bposit8_ref: per 32-block power-of-two scale from the RMS
-    (lrint = round-half-even), then nearest-code encode of x * 2^-scale."""
+    """ggml's quantize_row_bposit8_ref: per 32-block power-of-two scale from the exact RMS
+    (see scale_exp_exact), then nearest-code encode of x * 2^-scale."""
     if len(x) % QK:
         raise ValueError("row length not a multiple of 32")
     out = []
     for i in range(len(x) // QK):
         blk = x[i * QK:(i + 1) * QK]
-        sumsq = 0.0
-        for v in blk:
-            sumsq += v * v
-        rms = math.sqrt(sumsq / QK)
-        se = 0
-        if rms > 0.0:
-            se = max(-128, min(127, int(round(math.log2(rms)))))
+        se, _ = scale_exp_exact(blk)
         inv = math.ldexp(1.0, -se)
         out.append((se, [encode_nearest(v * inv) for v in blk]))
     return out
+
+
+def scale_exp_exact(blk) -> tuple[int, bool]:
+    """ggml_bp8_scale_exp_exact: se = round_half_even(log2(sqrt(S/32))) with S the EXACT
+    sum of squares (rational arithmetic; float32 squares are exact). floor(log2(S/32)) is
+    the top bit of the numerator over a power-of-two denominator; a tie (log2 exactly n+1/2)
+    is S a power of two. No libm, no FMA, no summation order. Returns (se, any_nonzero);
+    a non-finite element gives se = 0."""
+    from fractions import Fraction
+    S = Fraction(0)
+    any_nz = False
+    for v in blk:
+        if v == 0.0:
+            continue
+        if not math.isfinite(v):
+            return 0, True
+        any_nz = True
+        f = Fraction(v)
+        S += f * f
+    if not any_nz:
+        return 0, False
+    N, D = S.numerator, S.denominator          # D is a power of two
+    E = (N.bit_length() - 1) - (D.bit_length() - 1) - 5
+    tie = (N & (N - 1)) == 0
+    if E % 2 == 0:
+        se = E // 2
+    else:
+        n = (E - 1) // 2
+        se = (n if n % 2 == 0 else n + 1) if tie else n + 1
+    return max(-128, min(127, se)), True
 
 
 def exact_dot(xblocks, yblocks) -> float:

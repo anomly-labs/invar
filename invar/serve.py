@@ -238,11 +238,17 @@ def add_backend_args(ap: argparse.ArgumentParser) -> None:
                          "server decides, and that decision is part of the deployment")
     ap.add_argument("--threads", type=int, default=4,
                     help="llama.cpp thread count to pin (default 4)")
+    ap.add_argument("--device", default=None,
+                    help="llama.cpp compute device to pin: none = CPU only, or e.g. "
+                         "CUDA0 (see llama-cli --list-devices); unset = binary default")
+    ap.add_argument("--ngl", type=int, default=None,
+                    help="llama.cpp layers to offload to --device (pinned in the receipt)")
 
 
 def backend_from_args(a, model: str):
     return make_backend(a.backend, model, binary=a.binary, host=a.ollama_host,
-                        threads=a.threads, num_ctx=a.num_ctx, num_gpu=a.num_gpu)
+                        threads=a.threads, num_ctx=a.num_ctx, num_gpu=a.num_gpu,
+                        device=a.device, n_gpu_layers=a.ngl)
 
 
 def main():

@@ -66,6 +66,11 @@ def main():
     v.add_argument("--ollama-host", default=None,
                    help="Ollama server for Ollama entries (default OLLAMA_HOST "
                         "or http://127.0.0.1:11434)")
+    v.add_argument("--device", default=None,
+                   help="llama.cpp compute device to re-execute on (must match the "
+                        "certified deployment: none = CPU only, or e.g. CUDA0)")
+    v.add_argument("--ngl", type=int, default=None,
+                   help="llama.cpp layers offloaded to --device (must match the receipt)")
     v.add_argument("--no-reexecute", action="store_true",
                    help="structural + chain checks only")
     v.add_argument("--attest", default=None,
@@ -266,11 +271,12 @@ def main():
         seen = _profiles(a.worldline)
         if LLAMACPP_PROFILE in seen or LLAMACPP_EXACT_PROFILE in seen:
             if a.binary and a.model:
-                be = LlamaCppBackend(a.binary, a.model)
+                kw = dict(device=a.device, n_gpu_layers=a.ngl)
+                be = LlamaCppBackend(a.binary, a.model, **kw)
                 backends[LLAMACPP_PROFILE] = LlamaCppBackend(a.binary, a.model,
-                                                             profile=LLAMACPP_PROFILE)
+                                                             profile=LLAMACPP_PROFILE, **kw)
                 backends[LLAMACPP_EXACT_PROFILE] = LlamaCppBackend(
-                    a.binary, a.model, profile=LLAMACPP_EXACT_PROFILE)
+                    a.binary, a.model, profile=LLAMACPP_EXACT_PROFILE, **kw)
             else:
                 print("llama.cpp entries: re-execution needs --binary and "
                       "--model; running structural checks on them only",

@@ -16,7 +16,7 @@ completely different implementation, and the bits must match.
   logits, as JSON lines of little-endian float32 hex.
 - Verifier: `tests/csc/csc_verify.py` in llama-cpp-et. Pure Python integers, no shared
   code with the C kernel. It re-quantises the hidden row with the same block rule
-  (power-of-two scale from the RMS, nearest-code encode), reads the tied lm_head weight
+  (power-of-two scale from the exact RMS, nearest-code encode), reads the tied lm_head weight
   rows straight from the GGUF, accumulates products exactly, applies the one rounding,
   and compares float32 bit patterns.
 - Result: **1,024 of 1,024 sampled rows (128 per step over 8 steps) re-executed
@@ -131,6 +131,40 @@ re-executes challenged output rows against the layer's weights read straight fro
 GGUF. Measured on SmolLM2-135M b-posit8: **1,680 challenged rows across all 7 matmuls × 30
 layers re-executed bit-exactly in 0.2 s** (pure Python); a 1-ulp change to one served
 value in a challenged row REJECTs.
+
+## The exact profile on a GPU (CUDA, 2026-09-05)
+
+llama-cpp-et's CUDA backend now carries the same exact kernel: the activation quantiser
+runs on the device (the reference rule, below), every matmul accumulates in a 256-bit
+two's-complement quire (eight lazily-carried 64-bit limbs per lane, exact limb-wise warp
+reduction), and the readout is the CPU's limb-to-double loop with non-fused double
+operations. It is never routed through cuBLAS or the float vector kernels. Gate: a GPU
+dump of SmolLM2-135M (26 evaluations, 30 layers × 7 matmuls + lm_head) re-executed
+bit-exactly by the Python verifier (87,360 unit rows + 6,656 lm_head rows), by the Go
+verifier (1.9 s) and by the fork's own script; a 1-ulp change to one served value is
+rejected by both when every row is challenged. Decode on an RTX 5090: exact 114 tok/s
+against q8_0 1,160 tok/s (10×, launch-bound at this model size); the CPU exact path is
+60 tok/s on 8 threads.
+
+Two things this does **not** change. The float elementwise ops (RMSNorm, RoPE, SiLU,
+softmax) are still computed by the device's float kernels, so a GPU run and a CPU run
+of the same prompt are two different deployments: their dumps differ from the first
+norm row by an ulp, while every matmul in each dump re-executes bit-exactly from that
+dump's own inputs. INVAR therefore pins the device: `--device none` (CPU) or
+`--device CUDA0 --ngl 99`, certified as `device` and `n_gpu_layers` in the manifest and
+required to match at re-execution. And the CPU-vs-GPU boundary is the next target: with
+correctly-rounded float32 transcendentals on both sides the whole graph would be
+bit-identical across hardware, not only its matmuls.
+
+### The block-scale rule is integer-exact
+
+`scale_exp` for a 32-element block is round-half-even(log2(sqrt(S/32))) where S is the
+**exact** sum of squares (float32 squares are exact in double; ggml holds S as a 640-bit
+integer, the Python verifier as a rational, Go as a big integer, CUDA as the same 640-bit
+integer). floor(log2(S/32)) is the top set bit; the half-way case is S a power of two.
+No libm log2, no FMA contraction, no summation order can move it. The rule reproduces the
+previous libm-based quantiser byte-for-byte on the shipped model (full activation dump
+and the requantised GGUF identical), so existing receipts and GGUFs stand.
 
 What this covers: every matmul in the model — Q, K, V and output projections, FFN
 gate, up and down, and the lm_head. What stays deployment-pinned (same binary

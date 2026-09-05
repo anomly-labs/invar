@@ -32,6 +32,10 @@ def main():
         sys.stderr.write("fake llama: forced failure (FAKE_LLAMA_FAIL)\n")
         return 3
 
+    if "--list-devices" in sys.argv:
+        sys.stdout.write("Available devices:\n  CUDA0: Fake GPU 9000 (1 MiB, 1 MiB free)\n")
+        return 0
+
     prompt = _arg("-p", "")
     seed = _arg("--seed", "0")
     n = int(_arg("-n", "128") or "128")
