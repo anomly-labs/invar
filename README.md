@@ -102,6 +102,22 @@ specification — public spec, published conformance vectors, independent
 implementations. Verification is a property of the format, not a feature we
 gatekeep.
 
+## Check the arithmetic yourself
+
+Under the exact profile a client can re-execute a challenged sample of the server's
+lm_head rows on any machine, with an independent implementation, and demand bit-identical
+logits. The server certifies a dump digest before the challenge exists; the verifier
+picks the challenge later.
+
+```
+invar serve --model model-bposit8.gguf --binary llama-cli --spot-check
+invar verify worldline.jsonl --binary llama-cli --model model-bposit8.gguf --spot-check --rows 256
+```
+
+A TEE proves which software ran; this proves the numbers. Measured 4,096 challenged
+rows bit-exact in 3.8 s of pure Python; a 1-ulp change in a served logit is caught.
+[docs/SPOT-CHECK.md](docs/SPOT-CHECK.md).
+
 ## Verify from another language
 
 `go/crverify` is an independent Go implementation of the receipt format: canonical form,
