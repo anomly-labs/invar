@@ -18,8 +18,11 @@ FFN gate/up/SwiGLU/down and residual stream, plus the final norm and the logits:
 | x86 CPU, 1 thread | 33,792 | the same |
 | x86 CPU, 4 threads | 33,792 | the same |
 | x86 CPU, 16 threads | 33,792 | the same |
+| x86 CPU, a different binary (CPU-only build, no CUDA) | 13,312 | the same as the CUDA build's CPU run |
+| **aarch64** (static NEON build, run under qemu-aarch64) | 4,096 | the same as x86 on every row |
 
-A second prompt with 26 evaluations gave the same result. Every matmul unit in each dump
+A second prompt with 26 evaluations gave the same result. The aarch64 run is the third
+substrate: a different instruction set, compiler target and SIMD unit, with the same bits. Every matmul unit in each dump
 still re-executes bit-exactly under the Go verifier. Receipts minted on the GPU verify on
 the CPU with matching output digests (`invar verify --cross-deployment`, below).
 
@@ -81,10 +84,21 @@ invar verify worldline.jsonl --binary llama-cli --model model-bposit8.gguf --dev
 Float-profile entries never cross: the flag does nothing for them, because no
 cross-hardware claim exists there.
 
+## The library, in Python
+
+`invar/detmath.py` is the same library in Python: the identical sequence of double and
+float32 operations (Python floats are IEEE doubles without contraction; float32 steps are
+rounded through `struct`, which is innocuous double rounding for +, −, ×, ÷ and sqrt).
+`tests/test_detmath.py` compiles a harness around the C header and checks 24,615 random
+and edge inputs (exp, SiLU, sin/cos, log2, exp2, RoPE tables, RMSNorm scales, softmax
+rows) bit for bit. This is the first brick of a verifier that re-executes the whole
+graph without llama.cpp.
+
 ## Scope and limits
 
-- Verified on x86-64 (AVX2, 1/4/16 threads) and an RTX 5090 with the same binary. Other
-  backends (Metal, Vulkan, ROCm) do not carry `ggml-det` yet and are not covered.
+- Verified on x86-64 (AVX2, 1/4/16 threads, two different binaries), an RTX 5090, and an
+  aarch64 static build under QEMU. Other backends (Metal, Vulkan, ROCm) do not carry
+  `ggml-det` yet and are not covered.
 - Models whose graphs use ops beyond this list (YaRN RoPE, MoE routing, other activations)
   fall back to the original float code for those ops; the receipt still pins the
   deployment, and the exact matmuls remain spot-checkable.
