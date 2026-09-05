@@ -102,6 +102,14 @@ specification — public spec, published conformance vectors, independent
 implementations. Verification is a property of the format, not a feature we
 gatekeep.
 
+## What the exact profile costs
+
+Honest number, same binary, 4 CPU threads, SmolLM2-135M: q8_0 decodes at roughly 350–430
+tokens/s, F32 at ~97, the exact b-posit8 quire path at ~33. About 11× against q8_0 on a
+CPU today, because the exact path is scalar while q8_0 is SIMD. Use it where the
+guarantee is worth more than the throughput: small models, audit re-execution, and the
+spot-checks below, where 33 tokens/s is plenty.
+
 ## Check the arithmetic yourself
 
 Under the exact profile a client can re-execute a challenged sample of the server's
