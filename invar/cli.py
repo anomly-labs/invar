@@ -263,21 +263,28 @@ def main():
                 else:
                     gobin = os.environ.get("INVAR_SPOTCHECK_BIN") or shutil.which("invar-spotcheck")
                     if gobin:                       # Go implementation, ~70x faster, same math
-                        r = subprocess.run([gobin, "-gguf", a.model, "-dump", path, "-rows", str(a.rows),
-                                            "-nonce", (nonce + i.to_bytes(4, "big")).hex()],
-                                           capture_output=True, text=True, timeout=600)
+                        cmd = [gobin, "-gguf", a.model, "-dump", path, "-rows", str(a.rows),
+                               "-nonce", (nonce + i.to_bytes(4, "big")).hex()]
+                        if a.units:
+                            cmd += ["-units", "-unit-rows", str(a.unit_rows)]
+                        r = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
                         sok = r.returncode == 0
-                        swhy = (r.stdout.strip().splitlines() or ["(no output)"])[0].split("— ", 1)[-1] + " [go]"
+                        lines = r.stdout.strip().splitlines() or ["(no output)"]
+                        swhy = lines[0].split("— ", 1)[-1] + " [go]"
+                        ok = ok and sok
+                        why += "; spot-check: " + swhy
+                        if a.units and len(lines) > 1 and lines[1].startswith("units"):
+                            why += "; units: " + lines[1].split("— ", 1)[-1] + " [go]"
                     else:
                         sok, swhy, _, _ = verify_dump(a.model, path, nonce + i.to_bytes(4, "big"), a.rows)
-                    ok = ok and sok
-                    why += "; spot-check: " + swhy
-                    if ok and a.units:
-                        from .spotcheck import verify_units
-                        uok, uwhy, _, _, _ = verify_units(a.model, path, nonce + i.to_bytes(4, "big") + b"u",
-                                                          rows=a.unit_rows)
-                        ok = ok and uok
-                        why += "; units: " + uwhy
+                        ok = ok and sok
+                        why += "; spot-check: " + swhy
+                        if ok and a.units:
+                            from .spotcheck import verify_units
+                            uok, uwhy, _, _, _ = verify_units(a.model, path, nonce + i.to_bytes(4, "big") + b"u",
+                                                              rows=a.unit_rows)
+                            ok = ok and uok
+                            why += "; units: " + uwhy
             elif ok and e["manifest"].get("profile") == LLAMACPP_EXACT_PROFILE:
                 why += "; spot-check: no dump certified for this entry"
             new_results.append((i, ok, why))

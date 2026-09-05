@@ -515,6 +515,8 @@ func SampledRows(nonce []byte, nVocab, k int) []int {
 	return rows
 }
 
+func mathFloat32bitsOf(f float32) uint32 { return math.Float32bits(f) }
+
 // SpotResult summarises a VerifyDump run.
 type SpotResult struct {
 	OK       bool
