@@ -6,6 +6,16 @@ Under the exact profile (`llamacpp-bposit8-quire-v0`), llama-cpp-et now produces
 bits on an x86 CPU and on an NVIDIA GPU: every activation row of every layer, every logit,
 and the generated text. Not "close", not "same tokens": the same 32-bit patterns.
 
+## The models
+
+The b-posit8 GGUFs used below are published under the Anomly organisation on the Hub, one
+repo per model with the upstream licence on the card:
+`Anomly/SmolLM2-135M-Instruct-bposit8` (the one every fixture and vector references),
+`Anomly/SmolLM2-1.7B-Instruct-bposit8`, `Anomly/Qwen2.5-0.5B-Instruct-bposit8`,
+`Anomly/Llama-3.2-1B-Instruct-bposit8`, `Anomly/Gemma-3-270M-it-bposit8`,
+`Anomly/Mistral-7B-Instruct-v0.3-bposit8`. `products/invar/scripts/hf/upload_bposit8_gguf.py`
+makes new ones from any GGUF the fork's `llama-quantize ... BPOSIT8` produces.
+
 ## What was measured
 
 SmolLM2-135M in b-posit8, flash attention off, greedy decoding, the INVAR dump hook
