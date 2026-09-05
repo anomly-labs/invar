@@ -1432,13 +1432,13 @@ def sec_hwsign_attest(tmp, art):
         run_llamacpp(llama_et, real_gguf, "The capital of France is", n_predict=2, seed=1,
                      threads=4, logits_out=du, logits_matmuls=True)
         ev = SC.read_dump_units(du)
-        check("spotcheck units: dump has 30 layers x {Vcur,attn_out,ffn_gate,ffn_up,ffn_out} per eval",
+        check("spotcheck units: dump has 30 layers x {Qcur_mm,Kcur_mm,Vcur,attn_out,ffn_gate,ffn_up,ffn_out} per eval",
               len(ev) >= 2 and len(ev[0]["layers"]) == 30
-              and {"Vcur", "attn_out", "ffn_gate", "ffn_up", "ffn_out", "ffn_norm", "attn_norm", "kqv_out"}
-              <= set(ev[0]["layers"][0]))
+              and {"Qcur_mm", "Kcur_mm", "Vcur", "attn_out", "ffn_gate", "ffn_up", "ffn_out",
+                   "ffn_norm", "attn_norm", "kqv_out"} <= set(ev[0]["layers"][0]))
         uok, uwhy, un, ub, per = SC.verify_units(real_gguf, du, b"unit-nonce", rows=4, max_evals=1)
-        check("spotcheck units: REAL re-execution of 4 rows x 5 matmuls x 30 layers is bit-exact",
-              uok and un == 600 and ub == 0, uwhy)
+        check("spotcheck units: REAL re-execution of 4 rows x 7 matmuls x 30 layers is bit-exact",
+              uok and un == 840 and ub == 0, uwhy)
         lines = open(du).read().splitlines()
         rows0 = SC.sampled_rows(b"unit-nonce" + bytes([0, 0]) + b"ffn_out", 576, 4)
         for li, ln in enumerate(lines):

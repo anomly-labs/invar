@@ -356,7 +356,9 @@ def read_dump_units(path: str) -> list[dict]:
 FFN_UNITS = [("ffn_norm", "ffn_gate", "blk.{il}.ffn_gate.weight"),
              ("ffn_norm", "ffn_up", "blk.{il}.ffn_up.weight"),
              ("ffn_swiglu|ffn_gate_par", "ffn_out", "blk.{il}.ffn_down.weight")]
-ATTN_UNITS = [("attn_norm", "Vcur", "blk.{il}.attn_v.weight"),
+ATTN_UNITS = [("attn_norm", "Qcur_mm", "blk.{il}.attn_q.weight"),
+              ("attn_norm", "Kcur_mm", "blk.{il}.attn_k.weight"),
+              ("attn_norm", "Vcur", "blk.{il}.attn_v.weight"),
               ("kqv_out", "attn_out", "blk.{il}.attn_output.weight")]
 
 

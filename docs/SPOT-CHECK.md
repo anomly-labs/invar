@@ -124,16 +124,16 @@ invar verify worldline.jsonl --binary llama-cli --model model-bposit8.gguf --spo
 
 With `--spot-check-units` the dump also carries, for every layer, the last-row input and
 output of each exact matmul: `ffn_norm → ffn_gate`, `ffn_norm → ffn_up`,
-`ffn_swiglu → ffn_out` (down projection), `attn_norm → Vcur`, `kqv_out → attn_out`.
+`ffn_swiglu → ffn_out` (down projection), `attn_norm → Qcur_mm / Kcur_mm / Vcur` (the
+pre-RoPE projections, tagged by graph op), `kqv_out → attn_out`.
 `invar.spotcheck.verify_units` re-quantises each input row exactly as ggml does and
 re-executes challenged output rows against the layer's weights read straight from the
-GGUF. Measured on SmolLM2-135M b-posit8: **1,200 challenged rows across 5 matmuls × 30
+GGUF. Measured on SmolLM2-135M b-posit8: **1,680 challenged rows across all 7 matmuls × 30
 layers re-executed bit-exactly in 0.2 s** (pure Python); a 1-ulp change to one served
 value in a challenged row REJECTs.
 
-What this covers: essentially all of the model's arithmetic work — every FFN and the
-attention value and output projections, plus the lm_head. What stays deployment-pinned
-(same binary reproduces it, but no cross-implementation claim): RMSNorm, RoPE, the Q/K
-projections' post-RoPE values, the softmax and the SiLU, all float32 elementwise ops in
-the graph. Q and K matmul outputs are re-emitted under the same name after RoPE, so
-they are deliberately left out until the hook tags them apart.
+What this covers: every matmul in the model — Q, K, V and output projections, FFN
+gate, up and down, and the lm_head. What stays deployment-pinned (same binary
+reproduces it, but no cross-implementation claim): RMSNorm, RoPE, the softmax, the
+SiLU, and the attention score/value products, all float32 elementwise or attention ops
+in the graph.
