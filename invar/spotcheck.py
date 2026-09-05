@@ -363,6 +363,7 @@ def verify_dump(gguf_path: str, dump_path: str, nonce: bytes, rows: int = 256,
         return False, "dump has no (result_norm, result_output) pairs", 0, 0
     checked = bad = 0
     first_bad = ""
+    steps = [(h, l) for h, l in steps if len(l) > 0]      # prompt chunks without logits carry an empty marker
     for si, (hidden, logits) in enumerate(steps):
         if len(hidden) != n_embd or len(logits) != n_vocab:
             return False, f"step {si}: shape mismatch", checked, bad + 1
@@ -406,6 +407,8 @@ def read_dump_units(path: str) -> list[dict]:
                 cur = {"layers": {}}
             elif name in ("inp_embd", "embd"):       # the layer-0 residual input (token embedding row)
                 cur["inp_embd"] = vals
+            elif name == "inp_scaled":                # gemma: embedding * sqrt(n_embd)
+                cur["inp_scaled"] = vals
             elif "-" in name:
                 base, _, il = name.rpartition("-")
                 if il.isdigit():
@@ -493,7 +496,11 @@ def verify_elementwise(gguf_path: str, dump_path: str, max_evals: int = 0) -> tu
     n_head = int(kv.get(f"{arch}.attention.head_count", 1))
     n_head_kv = int(kv.get(f"{arch}.attention.head_count_kv", n_head))
     n_embd = int(kv.get(f"{arch}.embedding_length", 0))
-    head_dim = n_embd // n_head if n_head else 0
+    head_dim = int(kv.get(f"{arch}.attention.key_length", n_embd // n_head if n_head else 0))
+    gemma = arch.startswith("gemma")
+    n_swa = int(kv.get(f"{arch}.attention.sliding_window", 0))
+    swa_period = int(kv.get(f"{arch}.attention.sliding_window_pattern", 6))
+    freq_base_swa = float(kv.get(f"{arch}.rope.freq_base_swa", kv.get(f"{arch}.rope.freq_base", 10000.0)))
     n_dims = int(kv.get(f"{arch}.rope.dimension_count", head_dim))
     freq_base = float(kv.get(f"{arch}.rope.freq_base", 10000.0))
     freq_scale = 1.0 / float(kv.get(f"{arch}.rope.scaling.factor", 1.0))
@@ -525,15 +532,22 @@ def verify_elementwise(gguf_path: str, dump_path: str, max_evals: int = 0) -> tu
             if not first_bad:
                 first_bad = where
 
-    def rope_all_heads(row, pos, nh):
+    def rope_all_heads(row, pos, nh, il):
+        fb = freq_base_swa if (n_swa > 0 and (il + 1) % swa_period != 0) else freq_base
         out = []
         for h in range(nh):
-            out += dm.rope_row(row[h * head_dim:(h + 1) * head_dim], pos, n_dims, freq_base, freq_scale, 1.0, neox, freq_factors)
+            out += dm.rope_row(row[h * head_dim:(h + 1) * head_dim], pos, n_dims, fb, freq_scale, 1.0, neox, freq_factors)
+        return out
+
+    def norm_heads(row, w, nh):
+        out = []
+        for h in range(nh):
+            out += dm.rms_norm_row(row[h * head_dim:(h + 1) * head_dim], w, eps)
         return out
 
     for ei, ev in enumerate(evals):
         layers = ev["layers"]
-        prev_out = ev.get("inp_embd")            # residual stream entering layer 0
+        prev_out = ev.get("inp_scaled", ev.get("inp_embd"))   # residual stream entering layer 0
         for il in range(n_layer):
             lay = layers.get(il)
             if not lay:
@@ -545,26 +559,46 @@ def verify_elementwise(gguf_path: str, dump_path: str, max_evals: int = 0) -> tu
             for pre, biased, bname in (("Qcur_mm", "Qcur_bias", "attn_q.bias"), ("Kcur_mm", "Kcur_bias", "attn_k.bias"), ("Vcur", "Vcur_bias", "attn_v.bias")):
                 if biased in lay and pre in lay and f"blk.{il}.{bname}" in g.tensors:
                     rec("bias", same(dm.add_row(lay[pre], W(f"blk.{il}.{bname}")), lay[biased]), f"eval {ei} layer {il} {biased}")
+            for normed, src, wname, nh in (("Qcur_normed", "Qcur_mm", "attn_q_norm.weight", n_head), ("Kcur_normed", "Kcur_mm", "attn_k_norm.weight", n_head_kv)):
+                if normed in lay and src in lay and f"blk.{il}.{wname}" in g.tensors and head_dim:
+                    rec("qknorm", same(norm_heads(lay[src], W(f"blk.{il}.{wname}"), nh), lay[normed]), f"eval {ei} layer {il} {normed}")
             for base, nh in (("Qcur_rope", n_head), ("Kcur_rope", n_head_kv)):
-                src = "Qcur_mm" if base == "Qcur_rope" else "Kcur_mm"
-                src = src.replace("_mm", "_bias") if src.replace("_mm", "_bias") in lay else src
-                if base in lay and src in lay and ("_pos_" + base) in lay and head_dim:
-                    rec("rope", same(rope_all_heads(lay[src], lay["_pos_" + base], nh), lay[base]),
+                pre = "Qcur" if base == "Qcur_rope" else "Kcur"
+                src = next((n for n in (pre + "_normed", pre + "_bias", pre + "_mm") if n in lay), None)
+                if base in lay and src is not None and ("_pos_" + base) in lay and head_dim:
+                    rec("rope", same(rope_all_heads(lay[src], lay["_pos_" + base], nh, il), lay[base]),
                         f"eval {ei} layer {il} {base} pos {lay['_pos_' + base]}")
             ffn_inp = None
             if prev_out is not None and "attn_out" in lay:
-                ffn_inp = dm.add_row(prev_out, lay["attn_out"])
+                if f"blk.{il}.post_attention_norm.weight" in g.tensors:           # gemma: post-attention norm then residual
+                    post = dm.rms_norm_row(lay["attn_out"], W(f"blk.{il}.post_attention_norm.weight"), eps)
+                    if "attn_post_norm" in lay:
+                        rec("rmsnorm", same(post, lay["attn_post_norm"]), f"eval {ei} layer {il} attn_post_norm")
+                    ffn_inp = dm.add_row(post, prev_out)
+                    if "sa_out" in lay:
+                        rec("residual", same(ffn_inp, lay["sa_out"]), f"eval {ei} layer {il} sa_out")
+                else:
+                    ffn_inp = dm.add_row(prev_out, lay["attn_out"])
                 if "ffn_norm" in lay:
                     rec("rmsnorm", same(dm.rms_norm_row(ffn_inp, W(f"blk.{il}.ffn_norm.weight"), eps), lay["ffn_norm"]),
                         f"eval {ei} layer {il} ffn_norm")
             if "ffn_swiglu" in lay and "ffn_gate" in lay and "ffn_up" in lay:
                 rec("swiglu", same(dm.swiglu_row(lay["ffn_gate"], lay["ffn_up"]), lay["ffn_swiglu"]),
                     f"eval {ei} layer {il} ffn_swiglu")
+            if "ffn_geglu" in lay and "ffn_gate" in lay and "ffn_up" in lay:
+                rec("geglu", same(dm.geglu_row(lay["ffn_gate"], lay["ffn_up"]), lay["ffn_geglu"]),
+                    f"eval {ei} layer {il} ffn_geglu")
             if ffn_inp is not None and "ffn_out" in lay and "l_out" in lay:
-                rec("residual", same(dm.add_row(lay["ffn_out"], ffn_inp), lay["l_out"]),
-                    f"eval {ei} layer {il} l_out")
+                if f"blk.{il}.post_ffw_norm.weight" in g.tensors:                 # gemma: post-FFN norm then residual
+                    post = dm.rms_norm_row(lay["ffn_out"], W(f"blk.{il}.post_ffw_norm.weight"), eps)
+                    if "ffn_post_norm" in lay:
+                        rec("rmsnorm", same(post, lay["ffn_post_norm"]), f"eval {ei} layer {il} ffn_post_norm")
+                    rec("residual", same(dm.add_row(post, ffn_inp), lay["l_out"]), f"eval {ei} layer {il} l_out")
+                else:
+                    rec("residual", same(dm.add_row(lay["ffn_out"], ffn_inp), lay["l_out"]),
+                        f"eval {ei} layer {il} l_out")
             prev_out = lay.get("l_out")
-        if prev_out is not None and "hidden" in ev and "output_norm.weight" in g.tensors:
+        if prev_out is not None and ev.get("hidden") and "output_norm.weight" in g.tensors:
             rec("rmsnorm", same(dm.rms_norm_row(prev_out, W("output_norm.weight"), eps), ev["hidden"]),
                 f"eval {ei} result_norm")
     if not checked:

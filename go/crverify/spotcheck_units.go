@@ -34,7 +34,7 @@ type Unit struct {
 var AllUnits = []Unit{
 	{[]string{"ffn_norm"}, "ffn_gate", "blk.%d.ffn_gate.weight"},
 	{[]string{"ffn_norm"}, "ffn_up", "blk.%d.ffn_up.weight"},
-	{[]string{"ffn_swiglu", "ffn_gate_par"}, "ffn_out", "blk.%d.ffn_down.weight"},
+	{[]string{"ffn_swiglu", "ffn_gate_par", "ffn_geglu"}, "ffn_out", "blk.%d.ffn_down.weight"},
 	{[]string{"attn_norm"}, "Qcur_mm", "blk.%d.attn_q.weight"},
 	{[]string{"attn_norm"}, "Kcur_mm", "blk.%d.attn_k.weight"},
 	{[]string{"attn_norm"}, "Vcur", "blk.%d.attn_v.weight"},
