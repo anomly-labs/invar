@@ -146,7 +146,11 @@ its dumps are byte-identical across the two x86 binaries too. **Llama-3.2-1B-Ins
 (grouped-query attention 32/8, a 128k tied vocabulary, and Llama-3 RoPE frequency factors,
 now part of the deterministic RoPE on both backends and in the spec) is byte-identical across
 the two binaries at 10 tok/s exact, and the Go reference reproduces all 908 rows of its
-dump in 63 s. Two model families so far: SmolLM2 and Llama 3.
+dump in 63 s. **Qwen2.5-0.5B-Instruct** (NEOX-style RoPE and Q/K/V projection biases,
+which the dump now records as `Qcur_bias` rows) is byte-identical across the two binaries
+at 14 tok/s exact; the Go reference reproduces all 1,935 rows of its dump in 25 s and the
+elementwise verifier re-executes the bias additions. Three model families so far: SmolLM2,
+Llama 3 and Qwen2.5.
 
 So the exact profile is no longer defined by a binary; EXACT-PROFILE-SPEC.md writes it down
 as a specification a fourth implementation can be built from. Two independent implementations,

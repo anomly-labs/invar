@@ -200,6 +200,20 @@ class LlamaReexec:
             self.norms[name] = self.g.f32_tensor(name)
         return self.norms[name]
 
+    def bias(self, name: str):
+        """Projection bias (Qwen2 style) as a float32 array, or None."""
+        if name not in self.g.tensors:
+            return None
+        if name not in self.norms:
+            self.norms[name] = self.g.f32_tensor(name)
+        return np.array(self.norms[name], dtype=np.float32)
+
+    @staticmethod
+    def add_bias(rows: np.ndarray, b) -> np.ndarray:
+        if b is None:
+            return rows
+        return np.stack([np.array(dm.add_row(r.tolist(), b.tolist()), dtype=np.float32) for r in rows])
+
     def embed(self, tok: int) -> np.ndarray:
         """dequantize_row_bposit8 of the token's row: (float)(value * 2^se)."""
         m = self.tok_embd
@@ -222,6 +236,11 @@ class LlamaReexec:
             v = np.stack([self.w(pfx + "attn_v.weight").dot(cur[t]) for t in range(T)])
             if trace is not None:
                 trace.setdefault(il, {}).update(attn_norm=cur[-1], Qcur_mm=q[-1], Kcur_mm=k[-1], Vcur=v[-1])
+            bq, bk, bv = self.bias(pfx + "attn_q.bias"), self.bias(pfx + "attn_k.bias"), self.bias(pfx + "attn_v.bias")
+            if bq is not None or bk is not None or bv is not None:
+                q, k, v = self.add_bias(q, bq), self.add_bias(k, bk), self.add_bias(v, bv)
+                if trace is not None:
+                    trace[il].update(Qcur_bias=q[-1], Kcur_bias=k[-1], Vcur_bias=v[-1])
             qr = np.empty_like(q)
             kr = np.empty_like(k)
             for t in range(T):

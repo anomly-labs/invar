@@ -542,8 +542,12 @@ def verify_elementwise(gguf_path: str, dump_path: str, max_evals: int = 0) -> tu
             if prev_out is not None and "attn_norm" in lay:
                 rec("rmsnorm", same(dm.rms_norm_row(prev_out, W(f"blk.{il}.attn_norm.weight"), eps), lay["attn_norm"]),
                     f"eval {ei} layer {il} attn_norm")
+            for pre, biased, bname in (("Qcur_mm", "Qcur_bias", "attn_q.bias"), ("Kcur_mm", "Kcur_bias", "attn_k.bias"), ("Vcur", "Vcur_bias", "attn_v.bias")):
+                if biased in lay and pre in lay and f"blk.{il}.{bname}" in g.tensors:
+                    rec("bias", same(dm.add_row(lay[pre], W(f"blk.{il}.{bname}")), lay[biased]), f"eval {ei} layer {il} {biased}")
             for base, nh in (("Qcur_rope", n_head), ("Kcur_rope", n_head_kv)):
                 src = "Qcur_mm" if base == "Qcur_rope" else "Kcur_mm"
+                src = src.replace("_mm", "_bias") if src.replace("_mm", "_bias") in lay else src
                 if base in lay and src in lay and ("_pos_" + base) in lay and head_dim:
                     rec("rope", same(rope_all_heads(lay[src], lay["_pos_" + base], nh), lay[base]),
                         f"eval {ei} layer {il} {base} pos {lay['_pos_' + base]}")

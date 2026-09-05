@@ -391,6 +391,18 @@ func (m *Reexec) mm(name string, x []float32) ([]float32, error) {
 	return w.dot(xq), nil
 }
 
+// optional projection bias (Qwen2 style)
+func (m *Reexec) biasOpt(name string) []float32 {
+	if _, ok := m.g.Tensors[name]; !ok {
+		return nil
+	}
+	b, err := m.norm(name)
+	if err != nil {
+		return nil
+	}
+	return b
+}
+
 func f16Row(x []float32) []uint16 {
 	out := make([]uint16, len(x))
 	for i, v := range x {
@@ -437,20 +449,37 @@ func (m *Reexec) Forward(tokens []int, trace map[string][]float32) ([]float32, e
 				return nil, err
 			}
 		}
+		bq, bk, bv := m.biasOpt(pfx+"attn_q.bias"), m.biasOpt(pfx+"attn_k.bias"), m.biasOpt(pfx+"attn_v.bias")
+		qb, kb, vb := q, k, v
+		if bq != nil || bk != nil || bv != nil {
+			qb, kb, vb = make([][]float32, T), make([][]float32, T), make([][]float32, T)
+			for t := 0; t < T; t++ {
+				qb[t], kb[t], vb[t] = q[t], k[t], v[t]
+				if bq != nil {
+					qb[t] = AddRow(q[t], bq)
+				}
+				if bk != nil {
+					kb[t] = AddRow(k[t], bk)
+				}
+				if bv != nil {
+					vb[t] = AddRow(v[t], bv)
+				}
+			}
+		}
 		qr := make([][]float32, T)
 		kr := make([][]float32, T)
 		for t := 0; t < T; t++ {
 			pos := m.nPast + t
 			qr[t] = make([]float32, m.nEmbd)
 			for h := 0; h < m.nHead; h++ {
-				copy(qr[t][h*m.hDim:(h+1)*m.hDim], RopeRow(q[t][h*m.hDim:(h+1)*m.hDim], pos, m.nDims, m.freqBase, m.freqScale, 1, m.neox, m.freqFactors))
+				copy(qr[t][h*m.hDim:(h+1)*m.hDim], RopeRow(qb[t][h*m.hDim:(h+1)*m.hDim], pos, m.nDims, m.freqBase, m.freqScale, 1, m.neox, m.freqFactors))
 			}
 			kr[t] = make([]float32, m.nHeadKV*m.hDim)
 			for h := 0; h < m.nHeadKV; h++ {
-				copy(kr[t][h*m.hDim:(h+1)*m.hDim], RopeRow(k[t][h*m.hDim:(h+1)*m.hDim], pos, m.nDims, m.freqBase, m.freqScale, 1, m.neox, m.freqFactors))
+				copy(kr[t][h*m.hDim:(h+1)*m.hDim], RopeRow(kb[t][h*m.hDim:(h+1)*m.hDim], pos, m.nDims, m.freqBase, m.freqScale, 1, m.neox, m.freqFactors))
 			}
 			m.kCache[il] = append(m.kCache[il], f16Row(kr[t]))
-			m.vCache[il] = append(m.vCache[il], f16Row(v[t]))
+			m.vCache[il] = append(m.vCache[il], f16Row(vb[t]))
 		}
 		nKV := len(m.kCache[il])
 		kqvOut := make([][]float32, T)
@@ -507,6 +536,11 @@ func (m *Reexec) Forward(tokens []int, trace map[string][]float32) ([]float32, e
 			trace["Qcur_mm"+s] = q[T-1]
 			trace["Kcur_mm"+s] = k[T-1]
 			trace["Vcur"+s] = v[T-1]
+			if bq != nil || bk != nil || bv != nil {
+				trace["Qcur_bias"+s] = qb[T-1]
+				trace["Kcur_bias"+s] = kb[T-1]
+				trace["Vcur_bias"+s] = vb[T-1]
+			}
 			trace["Qcur_rope"+s] = qr[T-1]
 			trace["Kcur_rope"+s] = kr[T-1]
 			trace["kqv_out"+s] = kqvOut[T-1]
