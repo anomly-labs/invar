@@ -127,7 +127,8 @@ def run_llamacpp(binary: str, model: str, prompt: str,
                  n_predict: int = 128, seed: int = 1, threads: int = 4,
                  logits_out: str | None = None, logits_layers: bool = False,
                  logits_matmuls: bool = False, device: str | None = None,
-                 n_gpu_layers: int | None = None, flash_attn: str | None = None) -> str:
+                 n_gpu_layers: int | None = None, flash_attn: str | None = None,
+                 warmup: str | None = None) -> str:
     """Deterministically-pinned llama.cpp run; returns ONLY the generated text.
 
     Uses single-turn simple-io mode (-st --simple-io) — this llama.cpp line ships
@@ -144,6 +145,8 @@ def run_llamacpp(binary: str, model: str, prompt: str,
         cmd += ["-ngl", str(n_gpu_layers)]
     if flash_attn is not None:
         cmd += ["-fa", flash_attn]           # certified in params; "off" = exact KQ/softmax/KQV path
+    if warmup == "off":
+        cmd += ["--no-warmup"]               # certified in params; no warm-up evaluation in the dump
     env = dict(os.environ)
     env.pop("INVAR_LOGITS_OUT", None)
     if logits_out:
@@ -212,7 +215,7 @@ class LlamaCppBackend:
 
     def params(self, n_predict: int, seed: int) -> dict:
         return {"n_predict": n_predict, "seed": seed,
-                "threads": self.threads, "temp": 0, "flash_attn": "off"}
+                "threads": self.threads, "temp": 0, "flash_attn": "off", "warmup": "off"}
 
     def generate(self, prompt: str, params: dict) -> str:
         self.last_dump = None
@@ -226,9 +229,10 @@ class LlamaCppBackend:
         text = run_llamacpp(self.binary, self.model, prompt,
                             params["n_predict"], params["seed"],
                             params.get("threads", self.threads), logits_out=dump,
+                            logits_layers=self.dump_units,     # l_out rows: residual/norm re-execution
                             logits_matmuls=self.dump_units, device=self.device,
                             n_gpu_layers=self.n_gpu_layers,
-                            flash_attn=params.get("flash_attn"))
+                            flash_attn=params.get("flash_attn"), warmup=params.get("warmup"))
         if dump and os.path.exists(dump):
             self.last_dump = dump
         return text

@@ -163,6 +163,11 @@ No libm log2, no FMA contraction, no summation order can move it. The rule repro
 previous libm-based quantiser byte-for-byte on the shipped model (full activation dump
 and the requantised GGUF identical), so existing receipts and GGUFs stand.
 
+Since the deterministic graph (DETERMINISTIC-GRAPH.md) the same command also re-executes
+the elementwise ops from the dump — every RMSNorm, RoPE row, SwiGLU and residual add —
+with the Python port of `ggml-det` (`invar/detmath.py`), so a dump leaves only the
+attention product itself unverified.
+
 What this covers: every matmul in the model — Q, K, V and output projections, FFN
 gate, up and down, and the lm_head. What stays deployment-pinned (same binary
 reproduces it, but no cross-implementation claim): RMSNorm, RoPE, the softmax, the

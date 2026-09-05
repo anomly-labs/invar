@@ -94,6 +94,44 @@ and edge inputs (exp, SiLU, sin/cos, log2, exp2, RoPE tables, RMSNorm scales, so
 rows) bit for bit. This is the first brick of a verifier that re-executes the whole
 graph without llama.cpp.
 
+## Re-executing the elementwise ops from a dump
+
+With `invar verify --spot-check --units`, the Python verifier now also re-executes, from the
+dump alone and with `detmath`, every RMSNorm (attention, FFN and final), every RoPE row per
+head (the dump carries the token position), every SwiGLU and both residual adds of every
+layer, comparing float32 bits. On a 14-evaluation SmolLM2 dump: 2,492 rows (826 norms, 840
+RoPE, 420 SwiGLU, 406 residuals) bit-exact in 2.7 s; a 1-ulp change in any of them is
+rejected, and a change to a residual row is caught in every later row that consumes it.
+Together with the matmul units, the only op a dump cannot re-execute is the attention
+product itself, which needs the whole sequence: that is the job of a full reference
+re-executor, the next step.
+
+## A second implementation reproduces the whole graph (12:50)
+
+`invar/reexec.py` is a reference implementation of the exact-profile graph in Python and
+numpy, with no llama.cpp code: the GGUF is read by the stdlib reader, every matmul is the
+exact b-posit8 or float16 quire product (vectorised integer accumulation, the shared
+256-bit readout), and every other op is `detmath`. Given the token ids of each evaluation
+(now written into the dump by the hook) it replays the sequence, a float16 KV cache
+included, and compares every traced row of every layer and the logits against the dump:
+
+```
+python -m invar.reexec --gguf model-bposit8.gguf --dump logits.jsonl
+ACCEPT — 2954/2954 traced rows bit-identical to the dump over 7 evaluations (Kcur_mm:210/210, ..., kqv_out:210/210, l_out:210/210, result_norm:7/7, result_output:7/7) in 65.7s
+```
+
+Every attention output, every residual, every logit, over a warm-up, a 42-token prefill
+and the decode steps; the argmax of each re-executed logit row equals the token the
+runtime sampled next. A 1-ulp change to one attention row in the dump is rejected. It runs
+at about 1.3 s per prompt token and 1.6 s per decode token on SmolLM2-135M, and is reachable
+as `invar verify --spot-check --reexec` (needs numpy, `pip install anomly-invar[reexec]`).
+
+So the exact profile is no longer defined by a binary. Two independent implementations,
+in different languages, on CPUs of two architectures and on a GPU, produce the same bits
+from the same weights and tokens. What is still the runtime's: tokenisation (the token
+ids come from the dump), the model architecture (llama-family graphs), and the sampling
+policy (greedy is exact by construction).
+
 ## Scope and limits
 
 - Verified on x86-64 (AVX2, 1/4/16 threads, two different binaries), an RTX 5090, and an

@@ -71,6 +71,10 @@ def main():
                         "certified deployment: none = CPU only, or e.g. CUDA0)")
     v.add_argument("--ngl", type=int, default=None,
                    help="llama.cpp layers offloaded to --device (must match the receipt)")
+    v.add_argument("--reexec", action="store_true",
+                   help="exact profile: re-execute the WHOLE graph of every certified dump with the "
+                        "reference implementation (invar.reexec, numpy; no llama.cpp) from the GGUF "
+                        "and the token ids, comparing every traced row and logit bit for bit")
     v.add_argument("--cross-deployment", action="store_true",
                    help="exact-profile entries: re-execute even if the certified runtime/"
                         "device/n_gpu_layers differ from this verifier's (the exact graph is "
@@ -333,6 +337,11 @@ def main():
                         why += "; spot-check: " + swhy
                         if a.units and len(lines) > 1 and lines[1].startswith("units"):
                             why += "; units: " + lines[1].split("— ", 1)[-1] + " [go]"
+                        if ok and a.units:
+                            from .spotcheck import verify_elementwise
+                            eok, ewhy, _, _, _ = verify_elementwise(a.model, path)
+                            ok = ok and eok
+                            why += "; elementwise: " + ewhy
                     else:
                         sok, swhy, _, _ = verify_dump(a.model, path, nonce + i.to_bytes(4, "big"), a.rows)
                         ok = ok and sok
@@ -343,6 +352,16 @@ def main():
                                                               rows=a.unit_rows)
                             ok = ok and uok
                             why += "; units: " + uwhy
+                            if ok:
+                                from .spotcheck import verify_elementwise
+                                eok, ewhy, _, _, _ = verify_elementwise(a.model, path)
+                                ok = ok and eok
+                                why += "; elementwise: " + ewhy
+                if ok and a.reexec:
+                    from .reexec import reexec_dump
+                    rok, rwhy = reexec_dump(a.model, path)
+                    ok = ok and rok
+                    why += "; reexec: " + rwhy
             elif ok and e["manifest"].get("profile") == LLAMACPP_EXACT_PROFILE:
                 why += "; spot-check: no dump certified for this entry"
             new_results.append((i, ok, why))

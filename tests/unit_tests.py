@@ -214,7 +214,7 @@ def sec_worldline(tmp):
           m["cr"] == "0.1" and m["profile"] == WL.PROFILE
           and m["computation"]["kind"] == "llm-decode"
           and m["computation"]["params"] == {"n_predict": 12, "seed": 1, "threads": 4, "temp": 0,
-                                             "flash_attn": "off"}
+                                             "flash_attn": "off", "warmup": "off"}
           and m["inputs"]["prompt"] == digest_bytes(b"hello world")
           and m["outputs"]["text"] == digest_bytes(b"the-output"))
     check("build_entry certificate binds manifest", e["certificate"] == certificate_of(m))

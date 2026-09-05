@@ -240,6 +240,36 @@ class GGUF:
             pos = f.tell()
             self.data_base = (pos + align - 1) // align * align
 
+    def tensor_bytes(self, name: str) -> bytes:
+        """Raw bytes of a tensor (row-major, ggml block layout)."""
+        t = self.tensors[name]
+        if t["type"] == 43:
+            row_bytes = (t["dims"][0] // QK) * (1 + QK)
+        elif t["type"] == 0:
+            row_bytes = 4 * t["dims"][0]
+        elif t["type"] == 1:
+            row_bytes = 2 * t["dims"][0]
+        else:
+            raise ValueError(f"{name}: unsupported type {t['type']}")
+        n_rows = 1
+        for d in t["dims"][1:]:
+            n_rows *= d
+        with open(self.path, "rb") as f:
+            f.seek(self.data_base + t["offset"])
+            return f.read(row_bytes * n_rows)
+
+    def f32_tensor(self, name: str) -> list[float]:
+        """A whole F32 tensor (norm weights) as Python floats."""
+        t = self.tensors[name]
+        if t["type"] != 0:
+            raise ValueError(f"{name}: not F32 (type {t['type']})")
+        n = 1
+        for d in t["dims"]:
+            n *= d
+        with open(self.path, "rb") as f:
+            f.seek(self.data_base + t["offset"])
+            return list(struct.unpack("<%df" % n, f.read(4 * n)))
+
     @property
     def file_type(self) -> int | None:
         v = self.kv.get("general.file_type")
@@ -289,6 +319,10 @@ def read_dump_layers(path: str) -> list[tuple[list[float], list[float], dict[int
             if not line.strip():
                 continue
             d = json.loads(line)
+            if "hex" not in d:                     # inp_tokens (token ids) lines carry no row
+                continue
+            if "hex" not in d:                     # inp_tokens (token ids) lines carry no row
+                continue
             vals = list(struct.unpack("<%df" % d["n"], bytes.fromhex(d["hex"])))
             name = d["tensor"]
             if name.startswith("l_out-"):
@@ -360,6 +394,8 @@ def read_dump_units(path: str) -> list[dict]:
             if not line.strip():
                 continue
             d = json.loads(line)
+            if "hex" not in d:                     # inp_tokens (token ids) lines carry no row
+                continue
             vals = list(struct.unpack("<%df" % d["n"], bytes.fromhex(d["hex"])))
             name = d["tensor"]
             if name == "result_norm":
@@ -368,11 +404,16 @@ def read_dump_units(path: str) -> list[dict]:
                 cur["logits"] = vals
                 evals.append(cur)
                 cur = {"layers": {}}
+            elif name in ("inp_embd", "embd"):       # the layer-0 residual input (token embedding row)
+                cur["inp_embd"] = vals
             elif "-" in name:
                 base, _, il = name.rpartition("-")
                 if il.isdigit():
                     lay = cur["layers"].setdefault(int(il), {})
-                    lay.setdefault(base, vals)          # first occurrence wins
+                    if base not in lay:                  # first occurrence wins
+                        lay[base] = vals
+                        if "pos" in d:
+                            lay["_pos_" + base] = int(d["pos"])
     return evals
 
 
@@ -429,3 +470,101 @@ def verify_units(gguf_path: str, dump_path: str, nonce: bytes, rows: int = 16,
         return False, f"{bad}/{checked} challenged matmul rows differ ({first})", checked, bad, per
     return True, (f"{checked} challenged matmul rows re-executed bit-exactly "
                   f"({', '.join(f'{k}:{v}' for k, v in sorted(per.items()))}) over {len(evals)} evaluations"), checked, 0, per
+
+
+# ---------------------------------------------------------------- elementwise ops (ggml-det), cross-implementation
+
+_ROPE_NEOX_ARCHS = {"qwen2", "qwen3", "qwen2moe", "qwen3moe", "gemma", "gemma2", "gemma3", "phi2", "phi3",
+                    "stablelm", "olmo2", "gptneox", "falcon", "internlm2", "granite"}
+
+
+def verify_elementwise(gguf_path: str, dump_path: str, max_evals: int = 0) -> tuple[bool, str, int, int, dict]:
+    """Re-execute every captured non-matmul op of every layer from the dump alone, with the
+    ggml-det library in Python (invar.detmath): RMSNorm (attn_norm, ffn_norm, result_norm),
+    RoPE per head (Qcur_rope, Kcur_rope; needs the pos field), SwiGLU (ffn_swiglu) and the two
+    residual adds (ffn input, l_out). Together with verify_units (every matmul) this leaves
+    only the attention product itself unverified from a dump. Rows compare as float32 bits.
+    Returns (ok, why, checked_rows, mismatched_rows, per_kind_counts)."""
+    from . import detmath as dm
+    g = GGUF(gguf_path)
+    kv = g.kv
+    arch = kv.get("general.architecture", "llama")
+    eps = float(kv.get(f"{arch}.attention.layer_norm_rms_epsilon", 1e-5))
+    n_head = int(kv.get(f"{arch}.attention.head_count", 1))
+    n_head_kv = int(kv.get(f"{arch}.attention.head_count_kv", n_head))
+    n_embd = int(kv.get(f"{arch}.embedding_length", 0))
+    head_dim = n_embd // n_head if n_head else 0
+    n_dims = int(kv.get(f"{arch}.rope.dimension_count", head_dim))
+    freq_base = float(kv.get(f"{arch}.rope.freq_base", 10000.0))
+    freq_scale = 1.0 / float(kv.get(f"{arch}.rope.scaling.factor", 1.0))
+    neox = arch in _ROPE_NEOX_ARCHS
+    evals = read_dump_units(dump_path)
+    if max_evals:
+        evals = evals[:max_evals]
+    n_layer = int(kv.get(f"{arch}.block_count", 0))
+    checked = bad = 0
+    counts: dict[str, int] = {}
+    first_bad = ""
+    wcache: dict[str, list[float]] = {}
+
+    def W(name):
+        if name not in wcache:
+            wcache[name] = g.f32_tensor(name)
+        return wcache[name]
+
+    def same(a, b):
+        return len(a) == len(b) and all(f32_bits(x) == f32_bits(y) for x, y in zip(a, b))
+
+    def rec(kind, ok, where):
+        nonlocal checked, bad, first_bad
+        checked += 1
+        counts[kind] = counts.get(kind, 0) + 1
+        if not ok:
+            bad += 1
+            if not first_bad:
+                first_bad = where
+
+    def rope_all_heads(row, pos, nh):
+        out = []
+        for h in range(nh):
+            out += dm.rope_row(row[h * head_dim:(h + 1) * head_dim], pos, n_dims, freq_base, freq_scale, 1.0, neox)
+        return out
+
+    for ei, ev in enumerate(evals):
+        layers = ev["layers"]
+        prev_out = ev.get("inp_embd")            # residual stream entering layer 0
+        for il in range(n_layer):
+            lay = layers.get(il)
+            if not lay:
+                prev_out = None
+                continue
+            if prev_out is not None and "attn_norm" in lay:
+                rec("rmsnorm", same(dm.rms_norm_row(prev_out, W(f"blk.{il}.attn_norm.weight"), eps), lay["attn_norm"]),
+                    f"eval {ei} layer {il} attn_norm")
+            for base, nh in (("Qcur_rope", n_head), ("Kcur_rope", n_head_kv)):
+                src = "Qcur_mm" if base == "Qcur_rope" else "Kcur_mm"
+                if base in lay and src in lay and ("_pos_" + base) in lay and head_dim:
+                    rec("rope", same(rope_all_heads(lay[src], lay["_pos_" + base], nh), lay[base]),
+                        f"eval {ei} layer {il} {base} pos {lay['_pos_' + base]}")
+            ffn_inp = None
+            if prev_out is not None and "attn_out" in lay:
+                ffn_inp = dm.add_row(prev_out, lay["attn_out"])
+                if "ffn_norm" in lay:
+                    rec("rmsnorm", same(dm.rms_norm_row(ffn_inp, W(f"blk.{il}.ffn_norm.weight"), eps), lay["ffn_norm"]),
+                        f"eval {ei} layer {il} ffn_norm")
+            if "ffn_swiglu" in lay and "ffn_gate" in lay and "ffn_up" in lay:
+                rec("swiglu", same(dm.swiglu_row(lay["ffn_gate"], lay["ffn_up"]), lay["ffn_swiglu"]),
+                    f"eval {ei} layer {il} ffn_swiglu")
+            if ffn_inp is not None and "ffn_out" in lay and "l_out" in lay:
+                rec("residual", same(dm.add_row(lay["ffn_out"], ffn_inp), lay["l_out"]),
+                    f"eval {ei} layer {il} l_out")
+            prev_out = lay.get("l_out")
+        if prev_out is not None and "hidden" in ev and "output_norm.weight" in g.tensors:
+            rec("rmsnorm", same(dm.rms_norm_row(prev_out, W("output_norm.weight"), eps), ev["hidden"]),
+                f"eval {ei} result_norm")
+    if not checked:
+        return False, "no elementwise rows to re-execute (dump needs INVAR_LOGITS_MATMULS=1 and INVAR_LOGITS_LAYERS=1)", 0, 0, counts
+    summary = ", ".join(f"{k}:{v}" for k, v in sorted(counts.items()))
+    if bad:
+        return False, f"{bad}/{checked} elementwise rows differ ({first_bad})", checked, bad, counts
+    return True, f"{checked} elementwise rows re-executed bit-exactly in Python ({summary}) over {len(evals)} evaluations", checked, 0, counts
