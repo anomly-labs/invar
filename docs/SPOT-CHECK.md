@@ -44,6 +44,15 @@ valid attestation is caught at the first sampled row.
 - The property holds for the exact profile. A float profile has no cross-hardware
   bit-identity to check.
 
+## Availability
+
+The exact profile and the dump hook live in Anomly's llama.cpp fork (`llama-cpp-et`:
+the b-posit8 GGUF file type, the exact-quire kernel, and the `INVAR_LOGITS_OUT` /
+`INVAR_LOGITS_LAYERS` / `INVAR_LOGITS_MATMULS` capture hooks). That fork is not yet
+published; the verifier side in this repo is complete and tested against dumps it
+produced, and the hook is a ~60-line eval-callback that the doc above describes fully.
+Until the fork is public, the exact profile is available to design partners.
+
 ## Run it
 
 ```
