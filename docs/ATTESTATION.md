@@ -164,6 +164,14 @@ invar scitt verify verdict.cose --pubkey verdict.cose.pem --issuer did:web:audit
 curl -X POST http://ledger:8579/v1/tlog/register -d "{\"statement_b64\": \"$(base64 -w0 verdict.cose)\"}"
 ```
 
+Statements (entries, export packets, verdicts) also verify without Python: `go/crverify`
+`VerifyStatement` parses the COSE_Sign1 (EdDSA or ES256), checks the signature over the
+Sig_structure, and checks that the payload's certificate equals the CWT subject.
+`go run ./cmd/invar-statement -key verdict.cose.pem -issuer did:web:auditor.example verdict.cose`
+prints ACCEPT with the subject certificate and payload kind; it is tested against
+Python-produced statements and verdicts with tampered-signature, tampered-payload and
+wrong-issuer controls.
+
 This is what an independent auditor, a customer, or a second enclave (cross-vendor
 redundancy) hands back: "I re-executed these rows under this challenge and here is what
 I found", registrable in any transparency log, checkable forever.

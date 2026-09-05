@@ -100,7 +100,8 @@ Receipts are built on the open
 [Computation Receipts (CR-v0.1)](https://github.com/anomly-labs/computation-receipts)
 specification — public spec, published conformance vectors, independent
 implementations. Verification is a property of the format, not a feature we
-gatekeep.
+gatekeep. One page on what each layer proves and what none of them do:
+[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 ## What the exact profile costs
 
@@ -153,6 +154,7 @@ instance — can check an INVAR receipt without trusting the Python reference.
 
 ```
 cd go/crverify && go test ./... && go run ./cmd/invar-verify worldline.jsonl -attest binding.json -require-signature
+go run ./cmd/invar-statement -key verdict.cose.pem -issuer did:web:auditor.example verdict.cose   # COSE_Sign1 statements and verdicts
 ```
 
 ## Tests
