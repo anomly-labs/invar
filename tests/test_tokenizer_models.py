@@ -28,6 +28,21 @@ def main() -> int:
         print("SKIP:", e)
         return 0
     cases = [c.split(":") for c in os.environ.get("INVAR_TOKENIZER_CASES", "").split(";") if c] or [(g, d, P) for g, d in DEFAULT]
+    # published vectors (go/crverify/testdata/tokenizer-vectors.json): prompt -> ids per model, no dump needed
+    import json
+    vec = os.path.join(os.path.dirname(__file__), "..", "go", "crverify", "testdata", "tokenizer-vectors.json")
+    vran = vbad = 0
+    if os.path.exists(vec):
+        for c in json.load(open(vec))["cases"]:
+            gguf = f"{LAB}/{c['model']}-bposit8.gguf"
+            if not os.path.exists(gguf):
+                continue
+            tok = make_tokenizer(GGUF(gguf).kv)
+            y, m, d = (int(x) for x in c["template_date"].split("-"))
+            got = tok.encode(tok.render_chat(c["messages"], c["add_generation_prompt"], datetime.date(y, m, d)))
+            vran += 1
+            vbad += (got != c["ids"])
+            print(("VECTOR MATCH " if got == c["ids"] else "VECTOR DIFF  ") + c["model"], len(got), len(c["ids"]))
     ran = bad = 0
     for gguf, dump, prompt in cases:
         if not (os.path.exists(gguf) and os.path.exists(dump)):
@@ -39,9 +54,9 @@ def main() -> int:
         ok = got == want
         bad += (not ok)
         print(("MATCH " if ok else "DIFF  ") + os.path.basename(gguf), len(got), len(want) if want else None)
-    if not ran:
-        print("SKIP: no model/dump pairs found")
-    return 1 if bad else 0
+    if not ran and not vran:
+        print("SKIP: no model/dump pairs or vectors found")
+    return 1 if (bad or vbad) else 0
 
 
 if __name__ == "__main__":
