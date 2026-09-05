@@ -35,6 +35,43 @@ def _profiles(path: str) -> set[str]:
         return {json.loads(line)["manifest"].get("profile", "") for line in f}
 
 
+def _reexec_entry(model: str, dump: str, text_digest: str) -> tuple[bool, str]:
+    """Whole-graph reference re-execution of one certified dump: the Go binary
+    (INVAR_REEXEC_BIN or invar-reexec on PATH) when present, else the Python reference
+    (numpy). The certified output text is then checked from the reference greedy chain."""
+    import shutil
+    import subprocess
+    from .spotcheck import GGUF
+    from .tokens import detokenize, dump_token_evals, greedy_chain
+    from .crcore import digest_bytes
+    gobin = os.environ.get("INVAR_REEXEC_BIN") or shutil.which("invar-reexec")
+    final = None
+    if gobin:
+        r = subprocess.run([gobin, "-gguf", model, "-dump", dump], capture_output=True, text=True, timeout=86400)
+        lines = r.stdout.strip().splitlines()
+        if r.returncode not in (0, 1) or not lines:
+            return False, f"Go reference failed: {r.stderr.strip()[-200:]}"
+        ok = lines[0].startswith("ACCEPT")
+        why = lines[0].split("— ", 1)[-1] + " [go]"
+        for ln in lines[1:]:
+            if ln.startswith("final-argmax:"):
+                final = int(ln.split(":", 1)[1])
+        if not ok:
+            return False, why
+    else:
+        try:
+            from .reexec import reexec_dump
+        except ImportError:
+            return False, "no reference re-executor available (install numpy or put invar-reexec on PATH)"
+        ok, why = reexec_dump(model, dump, expect_text_digest=text_digest)
+        return ok, why + " [python]"
+    kv = GGUF(model).kv
+    chain = greedy_chain(dump_token_evals(dump), final, int(kv.get("tokenizer.ggml.eos_token_id", -1)))
+    if chain and digest_bytes(detokenize(kv, chain).encode()) == text_digest:
+        return True, why + f"; certified output text ({len(chain)} tokens) reproduced by the reference greedy chain"
+    return False, why + "; the reference greedy chain does NOT reproduce the certified output text"
+
+
 def main():
     # `invar serve ...` / `invar license ...` delegate to their modules with the
     # remaining argv, so each keeps its own argument surface.
@@ -358,8 +395,7 @@ def main():
                                 ok = ok and eok
                                 why += "; elementwise: " + ewhy
                 if ok and a.reexec:
-                    from .reexec import reexec_dump
-                    rok, rwhy = reexec_dump(a.model, path, expect_text_digest=e["manifest"]["outputs"]["text"])
+                    rok, rwhy = _reexec_entry(a.model, path, e["manifest"]["outputs"]["text"])
                     ok = ok and rok
                     why += "; reexec: " + rwhy
             elif ok and e["manifest"].get("profile") == LLAMACPP_EXACT_PROFILE:

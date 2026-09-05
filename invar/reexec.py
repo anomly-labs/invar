@@ -316,39 +316,11 @@ def compare_rows(a: np.ndarray, b: np.ndarray) -> int:
     return int((a != b).sum())
 
 
-# --------------------------------------------------------------------------- detokenisation (GPT-2 byte level)
-
-def _byte_decoder() -> dict[str, int]:
-    bs = list(range(ord("!"), ord("~") + 1)) + list(range(ord("\u00a1"), ord("\u00ac") + 1)) + list(range(ord("\u00ae"), ord("\u00ff") + 1))
-    cs = bs[:]
-    n = 0
-    for b in range(256):
-        if b not in bs:
-            bs.append(b)
-            cs.append(256 + n)
-            n += 1
-    return {chr(c): b for b, c in zip(bs, cs)}
+from .tokens import detokenize as _detokenize_kv  # noqa: E402
 
 
 def detokenize(g: GGUF, ids: list[int]) -> str:
-    """Text of generated token ids: byte-level pieces decoded to UTF-8 (gpt2-style vocabularies),
-    control tokens (type 3) skipped; sentencepiece-style vocabularies map the space marker."""
-    toks = g.kv["tokenizer.ggml.tokens"]
-    types = g.kv.get("tokenizer.ggml.token_type", [])
-    model = g.kv.get("tokenizer.ggml.model", "gpt2")
-    out = bytearray()
-    if model == "gpt2":
-        dec = _byte_decoder()
-        for t in ids:
-            if t < len(types) and types[t] == 3:
-                continue
-            out += bytes(dec.get(ch, ord("?")) for ch in toks[t])
-    else:
-        for t in ids:
-            if t < len(types) and types[t] == 3:
-                continue
-            out += toks[t].replace("\u2581", " ").encode("utf-8")
-    return out.decode("utf-8", "replace")
+    return _detokenize_kv(g.kv, ids)
 
 
 def reexec_dump(gguf_path: str, dump_path: str, max_evals: int = 0,

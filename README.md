@@ -162,6 +162,7 @@ instance — can check an INVAR receipt without trusting the Python reference.
 ```
 cd go/crverify && go test ./... && go run ./cmd/invar-verify worldline.jsonl -attest binding.json -require-signature
 go run ./cmd/invar-statement -key verdict.cose.pem -issuer did:web:auditor.example verdict.cose   # COSE_Sign1 statements and verdicts
+go run ./cmd/invar-reexec -gguf model-bposit8.gguf -dump logits.jsonl                                # whole-graph reference re-execution
 ```
 
 ## Tests

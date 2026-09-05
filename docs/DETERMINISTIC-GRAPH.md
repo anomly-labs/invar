@@ -133,6 +133,17 @@ output text. On a receipt minted on the RTX 5090 the reference chain reproduced 
 certified 8-token answer exactly, so the receipt's output is reproduced by an implementation
 that shares no code with the one that served it.
 
+And a third implementation: `go/crverify` now carries the same reference re-executor
+(`cmd/invar-reexec`, no numpy, no llama.cpp), sharing nothing with the Python one but the
+specification. It replays the same 135M dump in 9.6 s (Python: 66 s), a SmolLM2-1.7B dump
+(42-token prompt, 3 decodes) in 90 s, rejects the 1-ulp attention tamper, and runs bit-exactly
+as an arm64 binary under QEMU. `invar verify --reexec` uses it when `invar-reexec` is on
+PATH (or `INVAR_REEXEC_BIN`), Python otherwise; the certified output text is checked from
+the reference greedy chain either way.
+
+SmolLM2-1.7B in b-posit8 (converted tonight) decodes at 7 tok/s exact on 16 CPU threads;
+its dumps are byte-identical across the two x86 binaries too.
+
 So the exact profile is no longer defined by a binary. Two independent implementations,
 in different languages, on CPUs of two architectures and on a GPU, produce the same bits
 from the same weights and tokens. What is still the runtime's: tokenisation (the token
