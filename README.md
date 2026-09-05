@@ -126,6 +126,15 @@ as a COSE_Sign1 that registers in the transparency log. `invar scitt agree a.cos
 checks that independent verifiers, under different keys, reached the same verdicts on
 the same worldline: N-version verification across implementations, machines, or vendors.
 
+## For confidential-inference stacks (OpenPCC-shaped)
+
+Every signed response also carries `receipt.openpcc`, an evidence piece shaped like
+OpenPCC's `SignedEvidencePiece` (`{type: "ExecutionReceipt", data, signature}`). A
+client verifies it in four cheap steps with `go/crverify`'s `VerifyExecutionReceipt`:
+certificate and chain, the attestation-bundle digest and request nonce it is bound to,
+the node key's signature, and its own prompt and the returned output against the
+manifest digests. Attestation proves which software ran; this proves what it returned.
+
 ## Verify from another language
 
 `go/crverify` is an independent Go implementation of the receipt format: canonical form,
