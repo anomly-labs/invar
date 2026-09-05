@@ -159,6 +159,10 @@ published CR-v0.1 conformance vector byte-for-byte and accepts or rejects the sa
 worldlines the Python verifier does, so a client written in Go — an OpenPCC client, for
 instance — can check an INVAR receipt without trusting the Python reference.
 
+Prebuilt static binaries for linux-amd64 and linux-arm64 (`invar-verify`, `invar-spotcheck`,
+`invar-statement`, `invar-reexec`) are attached to every GitHub release; put `invar-reexec` on
+PATH and `invar verify --reexec` uses it.
+
 ```
 cd go/crverify && go test ./... && go run ./cmd/invar-verify worldline.jsonl -attest binding.json -require-signature
 go run ./cmd/invar-statement -key verdict.cose.pem -issuer did:web:auditor.example verdict.cose   # COSE_Sign1 statements and verdicts
