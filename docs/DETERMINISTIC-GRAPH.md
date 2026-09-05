@@ -173,7 +173,9 @@ layers, and a prompt that llama.cpp feeds in chunks: byte-identical across the t
 (2,661 lines) is byte-identical to the CPU's. Four model families: SmolLM2, Llama 3, Qwen2.5 and
 Gemma 3. And at production size: **Mistral-7B-Instruct-v0.3** in b-posit8 (7.5 GB) is
 byte-identical across the two x86 binaries (1,644 dump lines) at 3.7 tok/s exact on 24 threads,
-and the Go reference reproduces all 1,353 rows and logits of its dump in 186 s.
+and the Go reference reproduces all 1,353 rows and logits of its dump in 186 s. The full INVAR
+chain at 7B on the CPU (serve with per-matmul spot-checks, then verify with units, elementwise
+rows, the Go whole-graph reference, the certified text and tokenisation): ALL ACCEPT.
 
 So the exact profile is no longer defined by a binary; EXACT-PROFILE-SPEC.md writes it down
 as a specification a fourth implementation can be built from. Two independent implementations,
