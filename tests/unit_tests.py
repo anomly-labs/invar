@@ -1289,6 +1289,13 @@ def sec_hwsign_attest(tmp, art):
         lst, "tok-s", {"licensee": "unit@example", "tier": "ledger", "seats": 1,
                        "issuer": "did:web:ledger.example"}))
     lport = serve_bg(lsrv)
+    # The export packet certifies the second it was exported (exported_unix). The two exports
+    # below must be the SAME packet, so freeze the ledger's clock for both requests — otherwise
+    # a second boundary between them makes the certificates differ (a race seen in CI).
+    import types
+    import invar.ledger as _LG
+    _real_time = _LG.time
+    _LG.time = types.SimpleNamespace(time=lambda: 1_788_600_000.0)
     req = urllib.request.Request(f"http://127.0.0.1:{lport}/v1/export?device=dev-s&format=scitt",
                                  headers={"Authorization": "Bearer tok-s"})
     with urllib.request.urlopen(req, timeout=30) as r:
@@ -1299,6 +1306,7 @@ def sec_hwsign_attest(tmp, art):
           and infx["manifest"].get("entry_count") == len(sig_entries))
     st_json, jbody = http("GET", f"http://127.0.0.1:{lport}/v1/export?device=dev-s",
                           None, {"Authorization": "Bearer tok-s"})
+    _LG.time = _real_time
     check("ledger export scitt sub == json export packet_certificate",
           st_json == 200 and infx["sub"] == jbody["packet_certificate"])
     lsrv.shutdown()
