@@ -118,6 +118,14 @@ A TEE proves which software ran; this proves the numbers. Measured 4,096 challen
 rows bit-exact in 3.8 s of pure Python; a 1-ulp change in a served logit is caught.
 [docs/SPOT-CHECK.md](docs/SPOT-CHECK.md).
 
+## Verdicts you can hand to someone else
+
+`invar verify ... --verdict-out verdict.cose` signs the verifier's conclusion (worldline
+digest, per-entry verdicts, the checks and challenge used) with the verifier's own key,
+as a COSE_Sign1 that registers in the transparency log. `invar scitt agree a.cose b.cose`
+checks that independent verifiers, under different keys, reached the same verdicts on
+the same worldline: N-version verification across implementations, machines, or vendors.
+
 ## Verify from another language
 
 `go/crverify` is an independent Go implementation of the receipt format: canonical form,

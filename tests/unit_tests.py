@@ -1500,6 +1500,20 @@ def sec_hwsign_attest(tmp, art):
     check("verdict: a REJECT run still produces a signed verdict recording the rejection",
           code2 == 1 and ok2 and inf2["manifest"]["summary"]["rejected"] >= 1
           and any(not v["accept"] for v in inf2["manifest"]["verdicts"]))
+    # N-version agreement: a second, independent verifier (different key) on the same worldline
+    vd3 = os.path.join(tmp, "verdict_b.cose")
+    run_cli(["invar", "verify", wl.path, "--no-reexecute", "--trust-key", s1.key_id, "--require-signature",
+             "--verdict-out", vd3, "--verdict-signer", "software", "--state-dir", os.path.join(tmp, "verifier_b"),
+             "--verdict-issuer", "did:web:second"])
+    code_a, out_a = run_cli(["invar", "scitt", "agree", vd, vd3])
+    check("verdict agree: two independent verifiers, same worldline, same verdicts -> AGREE",
+          code_a == 0 and out_a.startswith("AGREE") and "2 distinct keys" in out_a)
+    code_b, out_b = run_cli(["invar", "scitt", "agree", vd, vd])
+    check("verdict agree: the same verifier twice is not independent -> REJECT",
+          code_b == 1 and "share a verifier key" in out_b)
+    code_c, out_c = run_cli(["invar", "scitt", "agree", vd, vd + "2"])
+    check("verdict agree: verdicts about different worldlines -> REJECT",
+          code_c == 1 and "different worldlines" in out_c)
     # verdict registers in the transparency log like any statement
     vr = tl.append(open(vd, "rb").read())
     check("verdict: registers in the transparency log with a verifying inclusion receipt",

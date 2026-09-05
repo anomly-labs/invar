@@ -134,7 +134,46 @@ def main():
     tcc = tgs.add_parser("consistency", help="verify a consistency proof between two heads")
     tcc.add_argument("old_head", help="JSON {tree_size, root}")
     tcc.add_argument("proof", help="JSON from /v1/tlog/consistency")
+    vv = scs.add_parser("agree", help="check that two or more verdict statements agree (N-version verification)")
+    vv.add_argument("verdicts", nargs="+", help="verdict.cose files (each with its .pem beside it)")
     a = ap.parse_args()
+
+    if a.cmd == "scitt" and a.scmd == "agree":
+        # N-version verification: independent verifiers (different implementations, machines,
+        # vendors) each re-executed under their own key; their verdicts must name the same
+        # worldline digest and reach the same per-entry conclusions. Any disagreement is a
+        # finding: a wrong implementation, a substituted input, or a compromised verifier.
+        from .scitt import verify_statement
+        docs = []
+        for path in a.verdicts:
+            okx, infx = verify_statement(open(path, "rb").read(), open(path + ".pem").read())
+            if not okx:
+                print(f"REJECT — {path}: {infx.get('why')}")
+                sys.exit(1)
+            m = infx["manifest"]
+            if m.get("kind") != "invar-verify-verdict":
+                print(f"REJECT — {path}: not a verdict statement")
+                sys.exit(1)
+            docs.append((path, infx["kid"], m))
+        digests = {m["worldline"]["digest"] for _, _, m in docs}
+        keys = {k for _, k, _ in docs}
+        if len(digests) != 1:
+            print(f"REJECT — verdicts are about different worldlines: {sorted(digests)}")
+            sys.exit(1)
+        if len(keys) != len(docs):
+            print("REJECT — two verdicts share a verifier key (not independent)")
+            sys.exit(1)
+        base = [(v["index"], v["accept"]) for v in docs[0][2]["verdicts"]]
+        for path, _, m in docs[1:]:
+            other = [(v["index"], v["accept"]) for v in m["verdicts"]]
+            if other != base:
+                diff = [i for (i, x), (_, y) in zip(base, other) if x != y]
+                print(f"REJECT — {docs[0][0]} and {path} disagree on entries {diff}")
+                sys.exit(1)
+        print(f"AGREE — {len(docs)} independent verifiers ({len(keys)} distinct keys) reached the same "
+              f"per-entry verdicts on worldline {docs[0][2]['worldline']['digest'][:23]}… "
+              f"({docs[0][2]['summary']['accepted']} accepted, {docs[0][2]['summary']['rejected']} rejected)")
+        sys.exit(0)
 
     if a.cmd == "tlog":
         from .tlog import check_receipt, check_consistency
