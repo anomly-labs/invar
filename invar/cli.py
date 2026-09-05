@@ -78,6 +78,10 @@ def main():
                    help="exact-profile entries with a certified dump: re-execute challenged "
                         "lm_head rows from the pinned GGUF (needs --model)")
     v.add_argument("--rows", type=int, default=256, help="challenged rows per evaluation")
+    v.add_argument("--units", action="store_true",
+                   help="with --spot-check: also re-execute challenged rows of every layer's "
+                        "FFN/attn-out matmuls (dump must have been made with --spot-check-units)")
+    v.add_argument("--unit-rows", type=int, default=8, help="challenged rows per matmul unit")
     v.add_argument("--nonce", default=None, help="challenge nonce hex (default: fresh random)")
     at = sub.add_parser("attest", help="attestation bindings")
     ats = at.add_subparsers(dest="acmd", required=True)
@@ -268,6 +272,12 @@ def main():
                         sok, swhy, _, _ = verify_dump(a.model, path, nonce + i.to_bytes(4, "big"), a.rows)
                     ok = ok and sok
                     why += "; spot-check: " + swhy
+                    if ok and a.units:
+                        from .spotcheck import verify_units
+                        uok, uwhy, _, _, _ = verify_units(a.model, path, nonce + i.to_bytes(4, "big") + b"u",
+                                                          rows=a.unit_rows)
+                        ok = ok and uok
+                        why += "; units: " + uwhy
             elif ok and e["manifest"].get("profile") == LLAMACPP_EXACT_PROFILE:
                 why += "; spot-check: no dump certified for this entry"
             new_results.append((i, ok, why))

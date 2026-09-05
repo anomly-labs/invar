@@ -101,7 +101,8 @@ def gguf_file_type(path: str) -> int | None:
 
 def run_llamacpp(binary: str, model: str, prompt: str,
                  n_predict: int = 128, seed: int = 1, threads: int = 4,
-                 logits_out: str | None = None) -> str:
+                 logits_out: str | None = None, logits_layers: bool = False,
+                 logits_matmuls: bool = False) -> str:
     """Deterministically-pinned llama.cpp run; returns ONLY the generated text.
 
     Uses single-turn simple-io mode (-st --simple-io) — this llama.cpp line ships
@@ -116,6 +117,10 @@ def run_llamacpp(binary: str, model: str, prompt: str,
     env.pop("INVAR_LOGITS_OUT", None)
     if logits_out:
         env["INVAR_LOGITS_OUT"] = logits_out       # llama-cpp-et CSC hook (see spotcheck.py)
+        if logits_layers:
+            env["INVAR_LOGITS_LAYERS"] = "1"       # also capture per-layer l_out rows
+        if logits_matmuls:
+            env["INVAR_LOGITS_MATMULS"] = "1"      # inputs/outputs of every FFN/attn-out matmul
     out = subprocess.run(cmd, capture_output=True, text=True, timeout=600,
                          stdin=subprocess.DEVNULL, env=env)
     if out.returncode != 0:
@@ -147,6 +152,7 @@ class LlamaCppBackend:
         self.binary, self.model, self.threads = binary, model, threads
         self.dumps_dir = dumps_dir            # when set (exact profile): capture CSC dumps
         self.dumps_keep = dumps_keep          # retention: oldest dumps beyond this are removed
+        self.dump_units = False               # also capture per-matmul units (INVAR_LOGITS_MATMULS)
         self.last_dump: str | None = None
         if profile is None:
             ft = gguf_file_type(model) if model and os.path.exists(model) else None
@@ -181,7 +187,8 @@ class LlamaCppBackend:
             os.unlink(dump)                    # the hook appends; start from nothing
         text = run_llamacpp(self.binary, self.model, prompt,
                             params["n_predict"], params["seed"],
-                            params.get("threads", self.threads), logits_out=dump)
+                            params.get("threads", self.threads), logits_out=dump,
+                            logits_matmuls=self.dump_units)
         if dump and os.path.exists(dump):
             self.last_dump = dump
         return text
@@ -198,7 +205,10 @@ class LlamaCppBackend:
         os.replace(self.last_dump, final)      # content-addressed evidence file
         self.last_dump = final
         self._prune_dumps()
-        return {"dump_digest": d, "n_evals": n, "what": "last-row result_norm+result_output per eval"}
+        what = "last-row result_norm+result_output per eval"
+        if self.dump_units:
+            what += " + per-layer matmul unit inputs/outputs"
+        return {"dump_digest": d, "n_evals": n, "what": what, "units": bool(self.dump_units)}
 
     def _prune_dumps(self) -> None:
         """Keep the newest `dumps_keep` dumps. A pruned dump makes its receipt's spot-check

@@ -254,6 +254,9 @@ def main():
                     help="exact profile only: keep a per-request logits dump (content-addressed, "
                          "beside the worldline) and certify its digest so a client can "
                          "re-execute challenged lm_head rows (docs/SPOT-CHECK.md)")
+    ap.add_argument("--spot-check-units", action="store_true",
+                    help="with --spot-check: also capture every layer's FFN/attn-out matmul "
+                         "inputs+outputs so verify --units can re-execute them")
     ap.add_argument("--spot-check-keep", type=int, default=1000,
                     help="retain this many newest spot-check dumps (0 = unlimited)")
     ap.add_argument("--attest", default=os.environ.get("INVAR_ATTEST"),
@@ -266,6 +269,7 @@ def main():
             ap.error("--spot-check needs the exact profile (a b-posit8 GGUF on llama-cpp-et)")
         backend.dumps_dir = a.worldline + ".dumps"
         backend.dumps_keep = a.spot_check_keep
+        backend.dump_units = a.spot_check_units
     dep = backend.deployment()          # fail fast: unreachable server / missing model
     os.makedirs(a.state_dir, mode=0o700, exist_ok=True)
     signer = make_signer(a.signer, a.state_dir)

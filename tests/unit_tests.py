@@ -1415,6 +1415,40 @@ def sec_hwsign_attest(tmp, art):
         td = os.path.join(tmp, "csc_tamper.jsonl"); open(td, "w").write("\n".join(lines) + "\n")
         ok, why, n, b = SC.verify_dump(real_gguf, td, b"unit-nonce", rows=32, max_steps=1)
         check("spotcheck: 1-ulp altered served logit in a challenged row -> REJECT", not ok and b == 1, why)
+        # per-layer rows: parse, and two same-deployment runs are identical layer by layer
+        d1, d2 = os.path.join(tmp, "lay1.jsonl"), os.path.join(tmp, "lay2.jsonl")
+        for dpath in (d1, d2):
+            run_llamacpp(llama_et, real_gguf, "The capital of France is", n_predict=2, seed=1,
+                         threads=4, logits_out=dpath, logits_layers=True)
+        L1, L2 = SC.read_dump_layers(d1), SC.read_dump_layers(d2)
+        check("spotcheck per-layer: dump parses with 30 l_out rows per evaluation",
+              len(L1) >= 2 and len(L1[0][2]) == 30 and len(L1[0][2][0]) == 576)
+        check("spotcheck per-layer: same-deployment runs identical layer by layer",
+              all(a[2] == b[2] and a[0] == b[0] and a[1] == b[1] for a, b in zip(L1, L2)))
+        check("spotcheck per-layer: read_dump ignores layer rows and still pairs evaluations",
+              len(SC.read_dump(d1)) == len(L1))
+        # per-matmul units: every FFN/attn-out matmul in every layer re-executes bit-exactly
+        du = os.path.join(tmp, "units.jsonl")
+        run_llamacpp(llama_et, real_gguf, "The capital of France is", n_predict=2, seed=1,
+                     threads=4, logits_out=du, logits_matmuls=True)
+        ev = SC.read_dump_units(du)
+        check("spotcheck units: dump has 30 layers x {Vcur,attn_out,ffn_gate,ffn_up,ffn_out} per eval",
+              len(ev) >= 2 and len(ev[0]["layers"]) == 30
+              and {"Vcur", "attn_out", "ffn_gate", "ffn_up", "ffn_out", "ffn_norm", "attn_norm", "kqv_out"}
+              <= set(ev[0]["layers"][0]))
+        uok, uwhy, un, ub, per = SC.verify_units(real_gguf, du, b"unit-nonce", rows=4, max_evals=1)
+        check("spotcheck units: REAL re-execution of 4 rows x 5 matmuls x 30 layers is bit-exact",
+              uok and un == 600 and ub == 0, uwhy)
+        lines = open(du).read().splitlines()
+        rows0 = SC.sampled_rows(b"unit-nonce" + bytes([0, 0]) + b"ffn_out", 576, 4)
+        for li, ln in enumerate(lines):
+            d = json.loads(ln)
+            if d["tensor"] == "ffn_out-0":
+                raw = bytearray(bytes.fromhex(d["hex"])); raw[rows0[0] * 4] ^= 0x01
+                d["hex"] = raw.hex(); lines[li] = json.dumps(d); break
+        tu = os.path.join(tmp, "units_tamper.jsonl"); open(tu, "w").write("\n".join(lines) + "\n")
+        uok, uwhy, _, ub, _ = SC.verify_units(real_gguf, tu, b"unit-nonce", rows=4, max_evals=1)
+        check("spotcheck units: 1-ulp altered ffn_out value in a challenged row -> REJECT", not uok and ub == 1, uwhy)
         # retention: serve keeps only the newest N dumps
         from invar.backends import LlamaCppBackend as _LB
         dd_dir = os.path.join(tmp, "dumps_keep")

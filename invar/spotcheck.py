@@ -250,19 +250,30 @@ def dump_digest(path: str) -> str:
 
 
 def read_dump(path: str) -> list[tuple[list[float], list[float]]]:
-    """[(hidden_row, logits_row), ...] per graph evaluation."""
-    steps, pending = [], None
+    """[(hidden_row, logits_row), ...] per graph evaluation. Per-layer rows
+    (INVAR_LOGITS_LAYERS=1, tensors "l_out-<n>") are skipped here; see read_dump_layers."""
+    return [(h, l) for h, l, _ in read_dump_layers(path)]
+
+
+def read_dump_layers(path: str) -> list[tuple[list[float], list[float], dict[int, list[float]]]]:
+    """[(hidden_row, logits_row, {layer: l_out_row}), ...] per graph evaluation. The
+    layer rows are deployment-pinned evidence for localising a divergence; they are not
+    cross-implementation re-executable (float32 norm/RoPE/SiLU/softmax in the graph)."""
+    steps, pending, layers = [], None, {}
     with open(path) as f:
         for line in f:
             if not line.strip():
                 continue
             d = json.loads(line)
             vals = list(struct.unpack("<%df" % d["n"], bytes.fromhex(d["hex"])))
-            if d["tensor"] == "result_norm":
+            name = d["tensor"]
+            if name.startswith("l_out-"):
+                layers[int(name[6:])] = vals
+            elif name == "result_norm":
                 pending = vals
-            elif d["tensor"] == "result_output" and pending is not None:
-                steps.append((pending, vals))
-                pending = None
+            elif name == "result_output" and pending is not None:
+                steps.append((pending, vals, layers))
+                pending, layers = None, {}
     return steps
 
 
@@ -309,3 +320,86 @@ def verify_dump(gguf_path: str, dump_path: str, nonce: bytes, rows: int = 256,
     if bad:
         return False, f"{bad}/{checked} challenged rows differ ({first_bad})", checked, bad
     return True, f"{checked} challenged lm_head rows re-executed bit-exactly over {len(steps)} evaluations", checked, 0
+
+
+# ---------------------------------------------------------------- per-matmul units (FFN + attention output)
+
+def read_dump_units(path: str) -> list[dict]:
+    """One dict per evaluation: {"hidden", "logits", "layers": {il: {name: row}}} keeping the
+    FIRST occurrence of each named tensor per layer per evaluation (names such as Qcur/Kcur
+    are re-emitted after RoPE; the first is the matmul output). Requires the dump to have
+    been produced with INVAR_LOGITS_MATMULS=1 for the per-layer entries to exist."""
+    evals: list[dict] = []
+    cur: dict = {"layers": {}}
+    with open(path) as f:
+        for line in f:
+            if not line.strip():
+                continue
+            d = json.loads(line)
+            vals = list(struct.unpack("<%df" % d["n"], bytes.fromhex(d["hex"])))
+            name = d["tensor"]
+            if name == "result_norm":
+                cur["hidden"] = vals
+            elif name == "result_output":
+                cur["logits"] = vals
+                evals.append(cur)
+                cur = {"layers": {}}
+            elif "-" in name:
+                base, _, il = name.rpartition("-")
+                if il.isdigit():
+                    lay = cur["layers"].setdefault(int(il), {})
+                    lay.setdefault(base, vals)          # first occurrence wins
+    return evals
+
+
+# unit = (input tensor name, output tensor name, weight tensor template)
+FFN_UNITS = [("ffn_norm", "ffn_gate", "blk.{il}.ffn_gate.weight"),
+             ("ffn_norm", "ffn_up", "blk.{il}.ffn_up.weight"),
+             ("ffn_swiglu|ffn_gate_par", "ffn_out", "blk.{il}.ffn_down.weight")]
+ATTN_UNITS = [("attn_norm", "Vcur", "blk.{il}.attn_v.weight"),
+              ("kqv_out", "attn_out", "blk.{il}.attn_output.weight")]
+
+
+def verify_units(gguf_path: str, dump_path: str, nonce: bytes, rows: int = 16,
+                 max_evals: int = 0, units=None) -> tuple[bool, str, int, int, dict]:
+    """Re-execute `rows` challenged output rows of every captured matmul unit in every
+    layer of every evaluation. Returns (ok, why, checked, mismatched, per_unit_counts)."""
+    units = units or (FFN_UNITS + ATTN_UNITS)
+    g = GGUF(gguf_path)
+    if g.file_type != 42:
+        return False, f"GGUF file_type {g.file_type} is not b-posit8 (42)", 0, 0, {}
+    evals = read_dump_units(dump_path)
+    if max_evals:
+        evals = evals[:max_evals]
+    checked = bad = 0
+    per: dict[str, int] = {}
+    first = ""
+    for ei, ev in enumerate(evals):
+        for il, lay in sorted(ev["layers"].items()):
+            for inp_names, out_name, wtpl in units:
+                inp = next((lay[n] for n in inp_names.split("|") if n in lay), None)
+                out = lay.get(out_name)
+                if inp is None or out is None:
+                    continue
+                t = g.tensors.get(wtpl.format(il=il))
+                if t is None or t["type"] != GGML_TYPE_BPOSIT8:
+                    continue
+                n_in, n_out = t["dims"][0], t["dims"][1]
+                if len(inp) != n_in or len(out) != n_out:
+                    return False, f"eval {ei} layer {il} {out_name}: shape mismatch", checked, bad, per
+                xq = quantize_row(inp)
+                for r in sampled_rows(nonce + bytes([ei & 0xFF, il & 0xFF]) + out_name.encode(), n_out, rows):
+                    got = f32_bits(to_f32(exact_dot(xq, g.bp8_row(t, r))))
+                    want = f32_bits(out[r])
+                    checked += 1
+                    per[out_name] = per.get(out_name, 0) + 1
+                    if got != want:
+                        bad += 1
+                        if not first:
+                            first = f"eval {ei} layer {il} {out_name} row {r}: re-executed {got:08x} vs served {want:08x}"
+    if not checked:
+        return False, "no matmul units captured (run the server with INVAR_LOGITS_MATMULS=1)", 0, 0, per
+    if bad:
+        return False, f"{bad}/{checked} challenged matmul rows differ ({first})", checked, bad, per
+    return True, (f"{checked} challenged matmul rows re-executed bit-exactly "
+                  f"({', '.join(f'{k}:{v}' for k, v in sorted(per.items()))}) over {len(evals)} evaluations"), checked, 0, per

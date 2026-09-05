@@ -81,3 +81,50 @@ exact accumulation, same readout): `go run ./cmd/invar-spotcheck -gguf model.ggu
 logits.jsonl -rows 512`. It is tested against Python-produced expected values on a real
 dump and the real GGUF. Measured: **4,096 challenged rows in 0.05 s** (Python: 3.8 s).
 Three implementations, no shared code, one bit pattern.
+
+
+## Per-layer rows (localisation, not yet re-execution)
+
+`INVAR_LOGITS_LAYERS=1` makes the llama-cli hook also capture every layer's residual-
+stream output (`l_out-<n>`, last row) into the same dump; `invar.spotcheck.read_dump_layers`
+returns them per evaluation. What they are good for today:
+
+- **Localising a divergence.** Two runs on the *same deployment* (pinned binary, weights,
+  threads) must produce identical `l_out` rows layer by layer; the first layer that
+  differs names the fault (kernel bug, SDC, memory corruption). This is the
+  deployment-pinned profile's guarantee applied inside the model.
+- **Evidence for a dispute.** With the dump digest certified in the receipt, a client
+  can later ask the operator for the per-layer rows and re-run the same binary.
+
+What they are **not** yet: cross-implementation re-executable. The lm_head rows are
+because they are one exact matmul over exactly-quantised inputs. A whole layer also
+runs RMSNorm, RoPE, SiLU and softmax in float32 inside the graph, and those are not
+order-free. Making a full layer spot-checkable means either (a) dumping the inputs and
+outputs of each *matmul* separately (the exact units) and re-executing those, or (b)
+moving the non-linear ops onto the exact profile as well (the CoNGA appendix does this
+in the SDK for a full Llama-1B forward pass with exact softmax denominators). Both are
+the same mechanism as the lm_head check, applied to more tensors; (a) is the next step.
+
+
+## Per-matmul units: every heavy op in every layer, cross-implementation (0.1.7)
+
+```
+invar serve --model model-bposit8.gguf --binary llama-cli --spot-check --spot-check-units
+invar verify worldline.jsonl --binary llama-cli --model model-bposit8.gguf --spot-check --units --unit-rows 8
+```
+
+With `--spot-check-units` the dump also carries, for every layer, the last-row input and
+output of each exact matmul: `ffn_norm → ffn_gate`, `ffn_norm → ffn_up`,
+`ffn_swiglu → ffn_out` (down projection), `attn_norm → Vcur`, `kqv_out → attn_out`.
+`invar.spotcheck.verify_units` re-quantises each input row exactly as ggml does and
+re-executes challenged output rows against the layer's weights read straight from the
+GGUF. Measured on SmolLM2-135M b-posit8: **1,200 challenged rows across 5 matmuls × 30
+layers re-executed bit-exactly in 0.2 s** (pure Python); a 1-ulp change to one served
+value in a challenged row REJECTs.
+
+What this covers: essentially all of the model's arithmetic work — every FFN and the
+attention value and output projections, plus the lm_head. What stays deployment-pinned
+(same binary reproduces it, but no cross-implementation claim): RMSNorm, RoPE, the Q/K
+projections' post-RoPE values, the softmax and the SiLU, all float32 elementwise ops in
+the graph. Q and K matmul outputs are re-emitted under the same name after RoPE, so
+they are deliberately left out until the hook tags them apart.
