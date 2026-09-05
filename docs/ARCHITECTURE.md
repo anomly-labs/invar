@@ -66,6 +66,16 @@ independent implementation, and compares float32 bits. Three implementations (C 
 Python, Go) agree; a 1-ulp change in a served value is caught. Elementwise float ops
 (norm, RoPE, SiLU, softmax) stay deployment-pinned.
 
+### 5b. Reference re-execution — that the whole answer follows from the weights and the prompt
+
+Under the exact profile two independent implementations (Python, Go; no llama.cpp code)
+replay the certified dump from the weights and the token ids: every layer's rows, the
+logits, the greedy chain and its detokenised text are compared with the certified ones,
+and the certified prompt text is re-tokenised the way llama.cpp does (byte-level BPE and
+sentencepiece). `invar verify --spot-check --units --reexec`. The arithmetic is written
+down in EXACT-PROFILE-SPEC.md so a third implementation can be built from the document
+and tested against the conformance fixture in `go/crverify/testdata`.
+
 ## 6. Statements and the transparency log — that it existed, when, asserted by whom
 
 Any entry, export packet or verification verdict can be enveloped as a SCITT-style Signed

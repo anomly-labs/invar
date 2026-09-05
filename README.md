@@ -79,7 +79,8 @@ Under the exact profile a receipt no longer depends on where it ran: minted on a
 re-executes on a CPU with the same output digest (`invar verify --cross-deployment`), and a
 reference implementation in Python with no llama.cpp code reproduces every activation and
 logit from the weights and token ids, and re-tokenises the certified prompt the way llama.cpp
-does for byte-level BPE vocabularies (`invar verify --spot-check --reexec`).
+does (byte-level BPE and sentencepiece: SmolLM2, Llama 3.2, Qwen2.5, Gemma 3), so a receipt is
+checked from prompt text to answer (`invar verify --spot-check --reexec`).
 
 ## What a receipt proves — and what it doesn't
 
