@@ -147,3 +147,116 @@ class BPETokenizer:
     def prompt_ids(self, prompt: str, now: datetime.date | None = None) -> list[int]:
         """The token ids llama-cli feeds for `-p prompt` in single-turn chat mode."""
         return self.encode(self.render_chat([{"role": "user", "content": prompt}], True, now))
+
+
+class SPMTokenizer:
+    """llama.cpp's sentencepiece (LLAMA_VOCAB_TYPE_SPM) tokeniser: one symbol per UTF-8
+    character, greedy bigram merges by token score (ties: leftmost), byte fallback
+    "<0xXX>" for pieces not in the vocabulary; spaces escaped to U+2581; special tokens
+    matched literally; BOS prepended once when add_bos_token."""
+
+    def __init__(self, kv: dict):
+        self.kv = kv
+        if kv.get("tokenizer.ggml.model") != "llama":
+            raise ValueError("not a sentencepiece (llama) vocabulary")
+        self.tokens = kv["tokenizer.ggml.tokens"]
+        self.scores = kv.get("tokenizer.ggml.scores", [0.0] * len(self.tokens))
+        self.types = kv.get("tokenizer.ggml.token_type", [1] * len(self.tokens))
+        self.id_of = {t: i for i, t in enumerate(self.tokens)}
+        self.specials = sorted((t for t, ty in zip(self.tokens, self.types) if ty in (3, 4)), key=len, reverse=True)
+        self.bos_id = int(kv.get("tokenizer.ggml.bos_token_id", -1))
+        self.add_bos = bool(kv.get("tokenizer.ggml.add_bos_token", False))
+        self.add_space_prefix = bool(kv.get("tokenizer.ggml.add_space_prefix", False))
+        self.pre = "spm"
+
+    def _split_specials(self, text: str):
+        return BPETokenizer._split_specials(self, text)
+
+    def _spm(self, text: str) -> list[int]:
+        import heapq
+        text = text.replace(" ", "\u2581")
+        syms = [ch for ch in text]                       # one symbol per code point
+        n = len(syms)
+        if n == 0:
+            return []
+        length = [len(ch.encode("utf-8")) for ch in syms]  # merged byte length, as llama.cpp tracks it
+        prev = [i - 1 for i in range(n)]
+        nxt = [i + 1 if i + 1 < n else -1 for i in range(n)]
+        text_of = list(syms)
+        heap: list = []
+        rev: dict[str, tuple[int, int]] = {}
+
+        def try_add(left: int, right: int):
+            if left == -1 or right == -1:
+                return
+            t = text_of[left] + text_of[right]
+            tid = self.id_of.get(t)
+            if tid is None:
+                return
+            heapq.heappush(heap, (-float(self.scores[tid]), left, length[left] + length[right], right, t))
+            rev[t] = (left, right)
+
+        for i in range(1, n):
+            try_add(i - 1, i)
+        while heap:
+            _, left, size, right, t = heapq.heappop(heap)
+            if length[left] == 0 or length[right] == 0 or length[left] + length[right] != size or text_of[left] + text_of[right] != t:
+                continue
+            text_of[left] = t
+            length[left] += length[right]
+            length[right] = 0
+            nxt[left] = nxt[right]
+            if nxt[right] >= 0:
+                prev[nxt[right]] = left
+            try_add(prev[left], left)
+            try_add(left, nxt[left])
+        out: list[int] = []
+
+        def reseg(i: int):
+            t = text_of[i]
+            tid = self.id_of.get(t)
+            if tid is not None:
+                out.append(tid)
+                return
+            p = rev.get(t)
+            if p is None:
+                for b in t.encode("utf-8"):
+                    out.append(self.id_of[f"<0x{b:02X}>"])
+                return
+            reseg(p[0])
+            reseg(p[1])
+        i = 0
+        while i != -1:
+            if length[i] > 0:
+                reseg(i)
+            i = nxt[i]
+        return out
+
+    def encode(self, text: str, add_bos: bool | None = None) -> list[int]:
+        ids: list[int] = []
+        first = True
+        for is_special, chunk in self._split_specials(text):
+            if is_special:
+                ids.append(self.id_of[chunk])
+            else:
+                if first and self.add_space_prefix and not chunk.startswith(" "):
+                    chunk = " " + chunk
+                ids += self._spm(chunk)
+            first = False
+        want_bos = self.add_bos if add_bos is None else add_bos
+        if want_bos and self.bos_id >= 0 and (not ids or ids[0] != self.bos_id):
+            ids.insert(0, self.bos_id)
+        return ids
+
+    render_chat = BPETokenizer.render_chat
+    prompt_ids = BPETokenizer.prompt_ids
+
+
+def make_tokenizer(kv: dict):
+    """The tokeniser for a GGUF vocabulary: byte-level BPE or sentencepiece."""
+    model = kv.get("tokenizer.ggml.model")
+    if model == "gpt2":
+        return BPETokenizer(kv)
+    if model == "llama":
+        return SPMTokenizer(kv)
+    raise ValueError(f"vocabulary model {model!r} not supported")

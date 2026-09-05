@@ -187,8 +187,9 @@ llama.cpp's own pre-tokeniser regexes per `tokenizer.ggml.pre` (`smollm`, `gpt2`
 prompt of tonight's dumps it reproduces the runtime's token ids exactly for SmolLM2 (42 ids),
 Qwen2.5 (43) and Llama-3.2 (49, including the dated system prompt). `invar verify --reexec`
 now reports whether the certified prompt text re-tokenises to the certified ids, using the
-receipt's timestamp for date-dependent templates; Gemma's sentencepiece vocabulary is not
-covered yet and is reported as such.
+receipt's timestamp for date-dependent templates. Gemma's sentencepiece vocabulary is covered
+too (llama.cpp's greedy score-driven merges with byte fallback): Gemma-3's 21 prompt ids
+reproduced. All four families re-tokenise identically to the runtime.
 
 ## Scope and limits
 

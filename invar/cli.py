@@ -45,8 +45,8 @@ def _tokenisation_note(model: str, dump: str, prompt_text: str | None, unix_time
         return "; tokenisation: not checked (no prompt text)"
     kv = GGUF(model).kv
     try:
-        from .tokenizer import BPETokenizer
-        tok = BPETokenizer(kv)
+        from .tokenizer import make_tokenizer
+        tok = make_tokenizer(kv)
     except (ImportError, ValueError) as e:
         return f"; tokenisation: not checked ({e})"
     want = prompt_ids_from_dump(dump_token_evals(dump), dump_eval_first_positions(dump))

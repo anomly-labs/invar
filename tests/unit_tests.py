@@ -1702,6 +1702,21 @@ def sec_tokenizer():
     except ValueError:
         bad = True
     check("bpe: a piece outside the vocabulary is a clear error", bad)
+    # sentencepiece: scores drive the merges, byte fallback for the rest, spaces -> U+2581
+    from invar.tokenizer import SPMTokenizer, make_tokenizer
+    stoks = ["<pad>", "<eos>", "<bos>", "<unk>", "h", "i", "hi", "\u2581", "\u2581t", "\u2581th", "e", "r", "\u2581the", "\u2581there", "<0x21>", "<0x7A>", "<start>"]
+    sscores = [-1000, -1000, -1000, -1000, -10, -10, -5, -10, -8, -6, -10, -10, -4, -3, -20, -20, -1000]
+    stypes = [3, 3, 3, 3, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 6, 6, 3]
+    skv = {"tokenizer.ggml.model": "llama", "tokenizer.ggml.tokens": stoks, "tokenizer.ggml.scores": sscores,
+           "tokenizer.ggml.token_type": stypes, "tokenizer.ggml.bos_token_id": 2, "tokenizer.ggml.eos_token_id": 1,
+           "tokenizer.ggml.add_bos_token": True, "tokenizer.ggml.add_space_prefix": False}
+    st = make_tokenizer(skv)
+    check("factory: llama model -> SPMTokenizer", isinstance(st, SPMTokenizer))
+    # '\u2581there' needs a 're' symbol the toy vocabulary lacks, so the merge stops at '\u2581the' + 'r' + 'e'
+    check("spm: merges by score ('hi there' -> hi, \u2581the, r, e), BOS prepended once",
+          st.encode("hi there") == [2, 6, 12, 11, 10] and st.encode("<bos>hi there") == [2, 6, 12, 11, 10])
+    check("spm: byte fallback for pieces outside the vocabulary ('!' -> <0x21>)", st.encode("hi!", add_bos=False) == [6, 14])
+    check("spm: special tokens literal", st.encode("<start>hi", add_bos=False) == [16, 6])
 
 
 def main():
