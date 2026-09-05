@@ -26,6 +26,13 @@ substrate: a different instruction set, compiler target and SIMD unit, with the 
 still re-executes bit-exactly under the Go verifier. Receipts minted on the GPU verify on
 the CPU with matching output digests (`invar verify --cross-deployment`, below).
 
+Two more invariances, both on SmolLM2-135M: feeding the prompt in 8-token batches instead
+of one (`-b 8 -ub 8`, fourteen evaluations instead of nine) gives the same text and the same
+served logit rows, and the Go reference accepts the chunked dump; and a mixed deployment with
+half the layers on the GPU and half on the CPU (`-ngl 15`) produces a dump byte-identical to the
+all-CPU run (4,626 lines). Batch size, device split, thread count and architecture are all
+outside the result.
+
 ## How
 
 Two things had to be true. Every matmul had to be exact, which the b-posit8 quire kernel
