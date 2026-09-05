@@ -82,6 +82,14 @@ def main():
                    help="with --spot-check: also re-execute challenged rows of every layer's "
                         "FFN/attn-out matmuls (dump must have been made with --spot-check-units)")
     v.add_argument("--unit-rows", type=int, default=8, help="challenged rows per matmul unit")
+    v.add_argument("--verdict-out", default=None,
+                   help="write a signed verification verdict (COSE_Sign1 over a certified "
+                        "verdict manifest: worldline digest, per-entry verdicts, checks run, "
+                        "challenge nonce) — a third party's re-execution as a registrable statement")
+    v.add_argument("--verdict-signer", default=os.environ.get("INVAR_SIGNER", "software"),
+                   help="software | tpm2 | tpm2:sha256:0,7 (verifier's key, keys under --state-dir)")
+    v.add_argument("--verdict-issuer", default=os.environ.get("INVAR_ISSUER", "invar-verifier"))
+    v.add_argument("--state-dir", default=os.environ.get("INVAR_STATE", os.path.expanduser("~/.invar")))
     v.add_argument("--nonce", default=None, help="challenge nonce hex (default: fresh random)")
     at = sub.add_parser("attest", help="attestation bindings")
     ats = at.add_subparsers(dest="acmd", required=True)
@@ -296,6 +304,39 @@ def main():
         bad += (not ok)
     print(f"{'ALL ACCEPT' if bad == 0 else f'{bad} REJECTED'} "
           f"({len(results)} entries)")
+
+    if a.verdict_out:
+        # A verification VERDICT as a certified, signed statement: what was checked, on which
+        # worldline (by digest), with which challenge, by whom (the verifier's key). Anyone
+        # can register it in a transparency log or hand it to an auditor; it is evidence
+        # that a specific third party re-executed and what it concluded.
+        import time as _time
+        from .attest import digest_file
+        from .hwsign import make_signer
+        from .scitt import signed_statement
+        from .crcore import certificate_of
+        os.makedirs(a.state_dir, mode=0o700, exist_ok=True)
+        signer = make_signer(a.verdict_signer, a.state_dir)
+        checks = {"structure": True, "reexecute": bool(reexec), "signatures_required": bool(a.require_signature),
+                  "trusted_keys": sorted(a.trust_key) if a.trust_key else None,
+                  "binding_genesis": binding.genesis() if binding else None}
+        if a.spot_check:
+            checks["spot_check"] = {"nonce": nonce.hex(), "rows": a.rows,
+                                    "units": bool(a.units), "unit_rows": a.unit_rows if a.units else None}
+        manifest = {"cr": "0.1", "kind": "invar-verify-verdict",
+                    "worldline": {"digest": digest_file(a.worldline), "entries": len(results)},
+                    "checks": checks,
+                    "verdicts": [{"index": i, "accept": bool(ok), "why": why} for i, ok, why in results],
+                    "summary": {"accepted": len(results) - bad, "rejected": bad},
+                    "unix_time": int(_time.time())}
+        entry = {"manifest": manifest, "certificate": certificate_of(manifest)}
+        stmt = signed_statement(entry, signer, a.verdict_issuer)
+        with open(a.verdict_out, "wb") as f:
+            f.write(stmt)
+        with open(a.verdict_out + ".pem", "w") as f:
+            f.write(signer.pubkey_pem)
+        print(f"verdict statement -> {a.verdict_out} (COSE_Sign1, {signer.backend}, key {signer.key_id[:23]}…; "
+              f"certificate {entry['certificate'][:23]}…; verifier pubkey beside it)")
     sys.exit(0 if bad == 0 else 1)
 
 

@@ -147,3 +147,23 @@ invar tlog consistency old_head.json proof.json              # ACCEPT — append
 Because statements carry digests only, a public log of computations leaks no prompts
 and no answers. It proves that a receipt existed, signed by a given key, no later than
 the tree head that includes it.
+
+
+## 7. Verification verdicts as signed statements
+
+A verifier's conclusion is itself evidence. `invar verify ... --verdict-out verdict.cose`
+writes a COSE_Sign1 over a certified verdict manifest: the worldline's digest, the
+per-entry ACCEPT/REJECT lines, which checks ran (re-execution, signatures required,
+trusted keys, binding genesis, spot-check nonce and row counts), and a summary, signed by
+the verifier's own software or TPM key (`--verdict-signer`, keys under `--state-dir`).
+The verifier's public key is written beside it. A REJECT run produces a verdict too.
+
+```
+invar verify worldline.jsonl --model model.gguf --spot-check --units --verdict-out verdict.cose --verdict-issuer did:web:auditor.example
+invar scitt verify verdict.cose --pubkey verdict.cose.pem --issuer did:web:auditor.example
+curl -X POST http://ledger:8579/v1/tlog/register -d "{\"statement_b64\": \"$(base64 -w0 verdict.cose)\"}"
+```
+
+This is what an independent auditor, a customer, or a second enclave (cross-vendor
+redundancy) hands back: "I re-executed these rows under this challenge and here is what
+I found", registrable in any transparency log, checkable forever.

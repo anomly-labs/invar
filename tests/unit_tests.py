@@ -1463,6 +1463,48 @@ def sec_hwsign_attest(tmp, art):
     else:
         print("  [SKIP] spot-check real re-execution (needs llama-cpp-et build + b-posit8 GGUF)")
 
+    # -- verification verdict statements: a verifier's conclusion as a signed, certified object
+    from invar.scitt import verify_statement as _vs
+    import invar.cli as CLI
+
+    def run_cli(argv):
+        old_argv = sys.argv[:]
+        sys.argv = argv
+        buf = io.StringIO()
+        code = 0
+        try:
+            with redirect_stdout(buf):
+                CLI.main()
+        except SystemExit as ex:
+            code = ex.code or 0
+        finally:
+            sys.argv = old_argv
+        return code, buf.getvalue()
+
+    vd = os.path.join(tmp, "verdict.cose")
+    code, out = run_cli(["invar", "verify", wl.path, "--no-reexecute", "--trust-key", s1.key_id,
+                         "--require-signature", "--verdict-out", vd, "--verdict-signer", "software",
+                         "--state-dir", os.path.join(tmp, "verifier_state"), "--verdict-issuer", "did:web:auditor"])
+    okv, infv = _vs(open(vd, "rb").read(), open(vd + ".pem").read(), "did:web:auditor")
+    m = infv.get("manifest", {})
+    check("verdict: verify --verdict-out writes a COSE_Sign1 that verifies with the verifier key",
+          code == 0 and okv and infv["iss"] == "did:web:auditor")
+    check("verdict: manifest certifies worldline digest, per-entry verdicts, checks, summary",
+          m.get("kind") == "invar-verify-verdict" and m["worldline"]["entries"] == 2
+          and all(v["accept"] for v in m["verdicts"]) and m["summary"] == {"accepted": 2, "rejected": 0}
+          and m["checks"]["signatures_required"] is True and m["checks"]["trusted_keys"] == [s1.key_id]
+          and m["worldline"]["digest"] == "sha256:" + hashlib.sha256(open(wl.path, "rb").read()).hexdigest())
+    code2, _ = run_cli(["invar", "verify", os.path.join(tmp, "sig_tamper.jsonl"), "--no-reexecute", "--verdict-out", vd + "2",
+                        "--verdict-signer", "software", "--state-dir", os.path.join(tmp, "verifier_state")])
+    ok2, inf2 = _vs(open(vd + "2", "rb").read(), open(vd + "2.pem").read())
+    check("verdict: a REJECT run still produces a signed verdict recording the rejection",
+          code2 == 1 and ok2 and inf2["manifest"]["summary"]["rejected"] >= 1
+          and any(not v["accept"] for v in inf2["manifest"]["verdicts"]))
+    # verdict registers in the transparency log like any statement
+    vr = tl.append(open(vd, "rb").read())
+    check("verdict: registers in the transparency log with a verifying inclusion receipt",
+          check_receipt(open(vd, "rb").read(), vr))
+
     check("AttestationBinding.none genesis == classic genesis",
           AttestationBinding.none().genesis() == Worldline.GENESIS
           and AttestationBinding.none().manifest_field() == {"kind": "none"})
