@@ -23,8 +23,8 @@ import os
 import sys
 
 from .attest import AttestationBinding
-from .backends import (LLAMACPP_PROFILE, OLLAMA_PROFILE, LlamaCppBackend,
-                       OllamaBackend)
+from .backends import (LLAMACPP_EXACT_PROFILE, LLAMACPP_PROFILE, OLLAMA_PROFILE,
+                       LlamaCppBackend, OllamaBackend)
 from .worldline import digest_bytes, verify_entries
 
 
@@ -86,7 +86,89 @@ def main():
                          help="snapshot the TPM SHA-256 PCR bank from sysfs (unsigned evidence)")
     ap_.add_argument("--out", default="pcr-bank.json")
     ap_.add_argument("--pcrs", default="0-7", help="range or list, e.g. 0-7 or 0,2,4,7")
+    aq = ats.add_parser("quote", help="SIGNED evidence: TPM 2.0 quote over PCRs with a nonce")
+    aq.add_argument("--out", default="tpm-quote", help="bundle directory")
+    aq.add_argument("--pcrs", default="sha256:0,1,2,4,7")
+    av = ats.add_parser("check-quote", help="verify a quote bundle's signature + nonce")
+    av.add_argument("bundle_dir")
+    sc = sub.add_parser("scitt", help="SCITT-style Signed Statements (COSE_Sign1) over entries")
+    scs = sc.add_subparsers(dest="scmd", required=True)
+    ss = scs.add_parser("sign", help="emit one Signed Statement per entry")
+    ss.add_argument("worldline")
+    ss.add_argument("--signer", default=os.environ.get("INVAR_SIGNER", "software"),
+                    help="software | tpm2 | tpm2:sha256:0,7 (same key store as serve)")
+    ss.add_argument("--state-dir", default=os.environ.get("INVAR_STATE",
+                    os.path.expanduser("~/.invar")))
+    ss.add_argument("--issuer", required=True, help="e.g. did:web:yourco.example")
+    ss.add_argument("--index", type=int, action="append", default=None,
+                    help="only these entry indices (repeatable); default all")
+    ss.add_argument("--out-dir", default="statements")
+    sv = scs.add_parser("verify", help="verify a Signed Statement against a public key")
+    sv.add_argument("statement")
+    sv.add_argument("--pubkey", required=True, help="PEM public key (from /health or the signer)")
+    sv.add_argument("--issuer", default=None)
+    tg = sub.add_parser("tlog", help="transparency-log receipts (offline checks)")
+    tgs = tg.add_subparsers(dest="tcmd", required=True)
+    tc = tgs.add_parser("check", help="verify an inclusion receipt for a statement you hold")
+    tc.add_argument("statement", help="COSE_Sign1 file")
+    tc.add_argument("receipt", help="registration receipt JSON (from register / inclusion)")
+    tcc = tgs.add_parser("consistency", help="verify a consistency proof between two heads")
+    tcc.add_argument("old_head", help="JSON {tree_size, root}")
+    tcc.add_argument("proof", help="JSON from /v1/tlog/consistency")
     a = ap.parse_args()
+
+    if a.cmd == "tlog":
+        from .tlog import check_receipt, check_consistency
+        if a.tcmd == "check":
+            with open(a.statement, "rb") as f:
+                stb = f.read()
+            ok = check_receipt(stb, json.load(open(a.receipt)))
+        else:
+            ok = check_consistency(json.load(open(a.old_head)), json.load(open(a.proof)))
+        print("ACCEPT — inclusion proof verifies" if (ok and a.tcmd == "check")
+              else "ACCEPT — log is append-only between the two heads" if ok
+              else "REJECT — proof does not verify")
+        sys.exit(0 if ok else 1)
+
+    if a.cmd == "scitt" and a.scmd == "sign":
+        from .hwsign import make_signer
+        from .scitt import statements_for_worldline
+        signer = make_signer(a.signer, a.state_dir)
+        os.makedirs(a.out_dir, exist_ok=True)
+        stmts = statements_for_worldline(a.worldline, signer, a.issuer, a.index)
+        idx = a.index if a.index is not None else range(len(stmts))
+        for i, st in zip(idx, stmts):
+            with open(os.path.join(a.out_dir, f"entry-{i}.cose"), "wb") as f:
+                f.write(st)
+        with open(os.path.join(a.out_dir, "signer.pem"), "w") as f:
+            f.write(signer.pubkey_pem)
+        print(f"{len(stmts)} Signed Statement(s) -> {a.out_dir}/ (COSE_Sign1, "
+              f"{signer.backend}, key {signer.key_id[:23]}…); public key in signer.pem")
+        return
+    if a.cmd == "scitt" and a.scmd == "verify":
+        from .scitt import verify_statement
+        with open(a.statement, "rb") as f:
+            st = f.read()
+        ok, info = verify_statement(st, open(a.pubkey).read(), a.issuer)
+        if ok:
+            print(f"ACCEPT — iss={info['iss']} sub={info['sub'][:30]}… alg={info['alg']} "
+                  f"profile={info['manifest'].get('profile')}")
+        else:
+            print(f"REJECT — {info.get('why')}")
+        sys.exit(0 if ok else 1)
+
+    if a.cmd == "attest" and a.acmd == "quote":
+        from .attest import collect_tpm_quote
+        doc = collect_tpm_quote(a.out, a.pcrs)
+        print(f"TPM quote bundle written to {a.out}/ (SIGNED by the AK; nonce {doc['nonce'][:16]}…)")
+        print(f"bind with: invar attest bind --kind tpm-quote --evidence {a.out}/quote.msg "
+              f"--verifier tpm2_checkquote --verdict {a.out}/bundle.json")
+        return
+    if a.cmd == "attest" and a.acmd == "check-quote":
+        from .attest import verify_tpm_quote
+        ok, why = verify_tpm_quote(a.bundle_dir)
+        print(("ACCEPT" if ok else "REJECT") + " — " + why)
+        sys.exit(0 if ok else 1)
 
     if a.cmd == "attest" and a.acmd == "collect-pcrs":
         from .attest import collect_pcr_bank
@@ -124,9 +206,13 @@ def main():
     backends = {}
     if reexec:
         seen = _profiles(a.worldline)
-        if LLAMACPP_PROFILE in seen:
+        if LLAMACPP_PROFILE in seen or LLAMACPP_EXACT_PROFILE in seen:
             if a.binary and a.model:
-                backends[LLAMACPP_PROFILE] = LlamaCppBackend(a.binary, a.model)
+                be = LlamaCppBackend(a.binary, a.model)
+                backends[LLAMACPP_PROFILE] = LlamaCppBackend(a.binary, a.model,
+                                                             profile=LLAMACPP_PROFILE)
+                backends[LLAMACPP_EXACT_PROFILE] = LlamaCppBackend(
+                    a.binary, a.model, profile=LLAMACPP_EXACT_PROFILE)
             else:
                 print("llama.cpp entries: re-execution needs --binary and "
                       "--model; running structural checks on them only",

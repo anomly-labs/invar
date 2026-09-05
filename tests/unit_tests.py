@@ -1106,8 +1106,20 @@ def sec_hwsign_attest(tmp, art):
         _, ep = wlp.infer_with_receipt(binA, model, "pcr", n_predict=4)
         check("TPM2 signer: PCR-policy-bound key signs under current PCR0,7 and verifies",
               ep["signature"]["pcr_policy"] == "sha256:0,7" and verify_signature(ep)[0])
+        from invar.attest import collect_tpm_quote, verify_tpm_quote
+        qd = os.path.join(tmp, "tq")
+        doc = collect_tpm_quote(qd, "sha256:0,7", tools_bin=tools)
+        check("TPM2 quote: signed bundle written (quote.msg/sig/pcrs, ak.pub, nonce)",
+              doc["signed"] and all(os.path.exists(os.path.join(qd, n))
+                                    for n in ("quote.msg", "quote.sig", "quote.pcrs", "ak.pub", "nonce.bin")))
+        ok, why = verify_tpm_quote(qd, tools_bin=tools)
+        check("TPM2 quote: tpm2_checkquote ACCEPTs signature + nonce", ok, why)
+        with open(os.path.join(qd, "nonce.bin"), "wb") as f:
+            f.write(b"\x00" * 20)
+        json.dump({**doc, "nonce": "00" * 20}, open(os.path.join(qd, "bundle.json"), "w"))
+        check("TPM2 quote: wrong nonce -> REJECT", not verify_tpm_quote(qd, tools_bin=tools)[0])
     else:
-        print(f"  [SKIP] TPM2 signer (need rw on /dev/tpmrm0 [{'ok' if tpm_ok else 'denied'}] "
+        print(f"  [SKIP] TPM2 signer + quote (need rw on /dev/tpmrm0 [{'ok' if tpm_ok else 'denied'}] "
               f"and tpm2-tools [{'ok' if os.path.exists(os.path.join(tools,'tpm2_sign')) else 'missing'}])")
 
     # -- attestation binding: genesis + certified host_attestation field
@@ -1191,6 +1203,162 @@ def sec_hwsign_attest(tmp, art):
     res = verify_entries(wlb.path, prb, {})
     check("verify unbound: entry 0 chain broken, entry 1 notes the unchecked attestation claim",
           not res[0][1] and res[1][1] and "NOT checked" in res[1][2], res[1][2][:80])
+
+    # -- exact llama.cpp profile: chosen from the GGUF file_type, certified in the manifest
+    from invar.backends import (LLAMACPP_EXACT_PROFILE, GGUF_FTYPE_BPOSIT8, gguf_file_type)
+    check("gguf_file_type: non-GGUF file -> None", gguf_file_type(art["model"]) is None)
+    import struct as _st
+    gg = os.path.join(tmp, "mini.gguf")           # minimal real GGUF v3 header with one KV
+    with open(gg, "wb") as f:
+        f.write(b"GGUF" + _st.pack("<I", 3) + _st.pack("<QQ", 0, 2))
+        k = b"general.architecture"; f.write(_st.pack("<Q", len(k)) + k + _st.pack("<I", 8))
+        v = b"llama"; f.write(_st.pack("<Q", len(v)) + v)
+        k = b"general.file_type"; f.write(_st.pack("<Q", len(k)) + k + _st.pack("<I", 4) + _st.pack("<I", GGUF_FTYPE_BPOSIT8))
+    check("gguf_file_type: parses general.file_type from a GGUF v3 header",
+          gguf_file_type(gg) == GGUF_FTYPE_BPOSIT8)
+    be_x = LlamaCppBackend(binA, gg)
+    check("LlamaCppBackend: b-posit8 GGUF -> exact profile + gguf_file_type in deployment",
+          be_x.profile == LLAMACPP_EXACT_PROFILE and be_x.deployment()["gguf_file_type"] == 42)
+    check("LlamaCppBackend: other GGUF/plain file -> pinned profile",
+          LlamaCppBackend(binA, art["model"]).profile == WL.PROFILE)
+    real = os.path.expanduser("~/development/hackathon-artifacts/SmolLM2-135M-Instruct-bposit8.gguf")
+    if os.path.exists(real):
+        check("REAL b-posit8 GGUF (llama-cpp-et) sniffs as file_type 42", gguf_file_type(real) == 42)
+
+    # -- SCITT signed statements (COSE_Sign1) over entries + Ledger export format=scitt
+    from invar.scitt import (signed_statement, verify_statement, statements_for_worldline,
+                             cbor, cbor_decode, Tag, CONTENT_TYPE)
+    e_first = json.loads(open(wl.path).readline())
+    st = signed_statement(e_first, s1, "did:web:unit.example")
+    check("scitt: statement is a tagged COSE_Sign1 (0xd2)", st[0] == 0xD2)
+    ok, info = verify_statement(st, s1.pubkey_pem, "did:web:unit.example")
+    check("scitt: EdDSA statement verifies; sub == certificate; manifest decoded",
+          ok and info["sub"] == e_first["certificate"] and info["alg"] == -8
+          and info["manifest"] == e_first["manifest"] and info["kid"] == s1.key_id)
+    check("scitt: wrong issuer -> REJECT", not verify_statement(st, s1.pubkey_pem, "did:web:other")[0])
+    other = SoftwareSigner(os.path.join(tmp, "other.key"))
+    check("scitt: wrong key -> signature invalid",
+          verify_statement(st, other.pubkey_pem)[1].get("why") == "signature invalid")
+    bad = bytearray(st); bad[-40] ^= 0x01
+    check("scitt: flipped signature byte -> REJECT", not verify_statement(bytes(bad), s1.pubkey_pem)[0])
+    tag, _ = cbor_decode(st); prot, unp, payload, sig = tag.value
+    pl = bytearray(payload); pl[len(pl) // 2] ^= 0x01
+    forged = cbor(Tag(18, [prot, unp, bytes(pl), sig]))
+    check("scitt: flipped payload byte -> REJECT", not verify_statement(forged, s1.pubkey_pem)[0])
+    e_bad = json.loads(json.dumps(e_first)); e_bad["certificate"] = "sha256:" + "0" * 64
+    check("scitt: entry whose certificate != manifest is refused at signing",
+          raises(ValueError, signed_statement, e_bad, s1, "x"))
+    sts = statements_for_worldline(wl.path, s1, "did:web:unit.example", [1])
+    check("scitt: statements_for_worldline honours index selection",
+          len(sts) == 1 and verify_statement(sts[0], s1.pubkey_pem)[1]["sub"]
+          == json.loads(open(wl.path).read().splitlines()[1])["certificate"])
+    if tpm_ok and os.path.exists(os.path.join(tools, "tpm2_sign")):
+        st_t = signed_statement(e_first, ts, "did:web:unit.example")
+        okt, inft = verify_statement(st_t, ts.pubkey_pem)
+        check("scitt: ES256 statement from the TPM key verifies", okt and inft["alg"] == -7)
+    # Ledger export format=scitt over HTTP
+    lst = LedgerStore(os.path.join(tmp, "ledger_scitt"), signer=s1)
+    lst.ingest("dev-s", sig_entries)
+    lsrv = ThreadingHTTPServer(("127.0.0.1", 0), ledger_handler(
+        lst, "tok-s", {"licensee": "unit@example", "tier": "ledger", "seats": 1,
+                       "issuer": "did:web:ledger.example"}))
+    lport = serve_bg(lsrv)
+    req = urllib.request.Request(f"http://127.0.0.1:{lport}/v1/export?device=dev-s&format=scitt",
+                                 headers={"Authorization": "Bearer tok-s"})
+    with urllib.request.urlopen(req, timeout=30) as r:
+        body = r.read(); ctype = r.headers.get("Content-Type", ""); kid = r.headers.get("X-Invar-Signer-Key-Id")
+    okx, infx = verify_statement(body, s1.pubkey_pem, "did:web:ledger.example")
+    check("ledger export format=scitt -> COSE_Sign1 over the certified packet, verifies",
+          okx and "cose" in ctype and kid == s1.key_id
+          and infx["manifest"].get("entry_count") == len(sig_entries))
+    st_json, jbody = http("GET", f"http://127.0.0.1:{lport}/v1/export?device=dev-s",
+                          None, {"Authorization": "Bearer tok-s"})
+    check("ledger export scitt sub == json export packet_certificate",
+          st_json == 200 and infx["sub"] == jbody["packet_certificate"])
+    lsrv.shutdown()
+    unsigned_store = LedgerStore(os.path.join(tmp, "ledger_nosig"))
+    usrv = ThreadingHTTPServer(("127.0.0.1", 0), ledger_handler(
+        unsigned_store, "tok-u", {"licensee": "u", "tier": "ledger", "seats": 1}))
+    uport = serve_bg(usrv)
+    stc, _b = http("GET", f"http://127.0.0.1:{uport}/v1/export?device=dev-s&format=scitt",
+                   None, {"Authorization": "Bearer tok-u"})
+    check("ledger export scitt without a signer -> 409", stc == 409)
+    usrv.shutdown()
+    os.environ.update(LEDGER_DIR=os.path.join(tmp, "ledger_env"), LEDGER_SIGNER="software",
+                      INVAR_STATE=os.path.join(tmp, "state_env"),
+                      LEDGER_TRUSTED_KEYS=f" {s1.key_id}, sha256:{'d' * 64} ")
+    from invar.ledger import store_from_env
+    st_env = store_from_env()
+    check("ledger store_from_env: dir, signer, trusted keys parsed",
+          st_env.root.endswith("ledger_env") and st_env.signer is not None
+          and st_env.trusted_key_ids == {s1.key_id, "sha256:" + "d" * 64})
+    for k in ("LEDGER_DIR", "LEDGER_SIGNER", "INVAR_STATE", "LEDGER_TRUSTED_KEYS"):
+        os.environ.pop(k, None)
+
+    # -- transparency log: RFC 6962 inclusion + consistency, property-tested, then HTTP
+    from invar.tlog import (TransparencyLog, check_receipt, check_consistency, verify_inclusion,
+                            _leaf_hash, _root)
+    tl = TransparencyLog(os.path.join(tmp, "tlog.b64"))
+    rcpts = []
+    heads = [tl.head()]
+    for i in range(37):
+        rcpts.append(tl.append(f"leaf-{i}".encode()))
+        heads.append(tl.head())
+    ok_all = all(check_receipt(f"leaf-{r['index']}".encode(), r) for r in rcpts)
+    check("tlog: every registration receipt verifies against its own tree head (n=37)", ok_all)
+    late = [tl.inclusion(i) for i in range(tl.size)]
+    check("tlog: fresh inclusion proofs at size 37 verify for every leaf",
+          all(check_receipt(f"leaf-{i}".encode(), late[i]) for i in range(tl.size)))
+    check("tlog: inclusion proof fails for a different leaf",
+          not check_receipt(b"leaf-999", late[5]))
+    bad = dict(late[5]); bad["path"] = list(bad["path"]); bad["path"][0] = "sha256:" + "0" * 64
+    check("tlog: tampered path element fails", not check_receipt(b"leaf-5", bad))
+    cons_ok = True
+    for m in range(0, tl.size + 1):
+        pr = tl.consistency(m)
+        if not check_consistency(heads[m], pr):
+            cons_ok = False
+            print("      consistency FAIL for old_size", m)
+            break
+    check("tlog: consistency proofs verify for every earlier size (0..37)", cons_ok)
+    fake_old = dict(heads[9]); fake_old["root"] = "sha256:" + "1" * 64
+    check("tlog: consistency rejects a forged earlier root", not check_consistency(fake_old, tl.consistency(9)))
+    tl2 = TransparencyLog(os.path.join(tmp, "tlog.b64"))
+    check("tlog: reload from disk reproduces root and size", tl2.head() == tl.head())
+    check("tlog: find returns the leaf index / -1", tl2.find(b"leaf-20") == 20 and tl2.find(b"x") == -1)
+    # HTTP surface on the Ledger: register a real SCITT statement, fetch head/inclusion
+    tls = LedgerStore(os.path.join(tmp, "ledger_tlog"), signer=s1)
+    tls.ingest("dev-t", sig_entries)
+    tsrv = ThreadingHTTPServer(("127.0.0.1", 0), ledger_handler(
+        tls, "tok-t", {"licensee": "u", "tier": "ledger", "seats": 1, "issuer": "did:web:t"}))
+    tport = serve_bg(tsrv)
+    th = {"Authorization": "Bearer tok-t", "Content-Type": "application/json"}
+    stc, hd = http("GET", f"http://127.0.0.1:{tport}/v1/tlog/head", None, th)
+    check("ledger tlog: empty head", stc == 200 and hd["tree_size"] == 0)
+    stc, r1 = http("POST", f"http://127.0.0.1:{tport}/v1/tlog/register",
+                   {"statement_b64": base64.b64encode(st).decode()}, th)
+    check("ledger tlog: register a COSE_Sign1 -> receipt index 0 verifies",
+          stc == 200 and r1["index"] == 0 and check_receipt(st, r1))
+    stc, _e = http("POST", f"http://127.0.0.1:{tport}/v1/tlog/register",
+                   {"statement_b64": base64.b64encode(b"not cose").decode()}, th)
+    check("ledger tlog: non-COSE payload -> 400", stc == 400)
+    req = urllib.request.Request(f"http://127.0.0.1:{tport}/v1/export?device=dev-t&format=scitt&register=1",
+                                 headers={"Authorization": "Bearer tok-t"})
+    with urllib.request.urlopen(req, timeout=30) as r:
+        exp_st = r.read(); rc_hdr = r.headers.get("X-Invar-Tlog-Receipt")
+    rc = json.loads(base64.b64decode(rc_hdr))
+    check("ledger export scitt&register=1 -> statement registered, header receipt verifies",
+          rc["index"] == 1 and check_receipt(exp_st, rc))
+    stc, inc = http("GET", f"http://127.0.0.1:{tport}/v1/tlog/inclusion?index=1", None, th)
+    stc2, lf = http("GET", f"http://127.0.0.1:{tport}/v1/tlog/leaf?index=1", None, th)
+    check("ledger tlog: inclusion + leaf endpoints round-trip",
+          stc == 200 and stc2 == 200 and check_receipt(base64.b64decode(lf["statement_b64"]), inc))
+    stc, cp = http("GET", f"http://127.0.0.1:{tport}/v1/tlog/consistency?old_size=1", None, th)
+    check("ledger tlog: consistency endpoint verifies vs the earlier head",
+          stc == 200 and check_consistency(r1 | {"tree_size": 1}, cp))
+    stc, _x = http("GET", f"http://127.0.0.1:{tport}/v1/tlog/inclusion?index=99", None, th)
+    check("ledger tlog: unknown index -> 404", stc == 404)
+    tsrv.shutdown()
 
     check("AttestationBinding.none genesis == classic genesis",
           AttestationBinding.none().genesis() == Worldline.GENESIS

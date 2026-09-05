@@ -61,3 +61,14 @@ Single shared bearer token (per-device tokens in v1); no SSO/retention policies
 yet; export is whole-device (time-range filters in v1). See docs/THREATMODEL.md
 for the trust boundary — including that a fully-compromised device can fabricate
 a plausible NEW history but cannot rewrite what the Ledger already holds.
+
+
+## Signed statements + transparency log
+
+Start the Ledger with `LEDGER_SIGNER=software` (or `tpm2:sha256:0,7`) and optionally
+`LEDGER_ISSUER=did:web:yourco.example`; then `GET /v1/export?device=ID&format=scitt`
+returns a COSE_Sign1 over the certified chain-of-custody packet, and `&register=1`
+registers it in the Ledger's transparency log (`ledger-data/tlog.b64`). Endpoints:
+`POST /v1/tlog/register`, `GET /v1/tlog/head | inclusion?index= | consistency?old_size= |
+leaf?index=`. `LEDGER_TRUSTED_KEYS=key_id,key_id` pins which device signing keys the
+Ledger accepts at ingest. Details: ATTESTATION.md §6.

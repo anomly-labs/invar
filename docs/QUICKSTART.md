@@ -62,6 +62,13 @@ LEDGER_URL=https://ledger.yourco.com LEDGER_TOKEN=<shared-secret> \
 Every inference now lands, verified-at-the-door, in your fleet's custody log;
 `GET /v1/export?device=<id>` returns a certified chain-of-custody packet.
 
+## Exact-arithmetic profile (optional)
+Serve a b-posit8 GGUF with the llama-cpp-et build and receipts switch to profile
+`llamacpp-bposit8-quire-v0` automatically: every matmul accumulates in an exact 256-bit
+quire, so the certified arithmetic is order-independent and re-executable across
+implementations rather than only on the pinned box. Other GGUFs keep the pinned profile.
+The profile is certified inside each receipt, so a verifier always knows which it holds.
+
 ## Bind the chain to your platform, sign with your TPM (optional)
 ```
 invar attest collect-pcrs --out pcr-bank.json          # or snpguest / tdx / nvtrust evidence

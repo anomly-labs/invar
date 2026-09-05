@@ -1,0 +1,121 @@
+[
+  {
+    "name": "canonical/empty-object",
+    "input": {},
+    "canonical": "{}",
+    "digest": "sha256:44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a"
+  },
+  {
+    "name": "canonical/key-order",
+    "input": {
+      "b": 1,
+      "a": {
+        "d": [
+          1,
+          2,
+          3
+        ],
+        "c": "x"
+      }
+    },
+    "canonical": "{\"a\":{\"c\":\"x\",\"d\":[1,2,3]},\"b\":1}",
+    "digest": "sha256:1576e32304fe36b2f02f8553d0d6e4a317e348bbe74e80234e4f123b66f8f142"
+  },
+  {
+    "name": "canonical/utf8",
+    "input": {
+      "k": "café-é中"
+    },
+    "canonical": "{\"k\":\"café-é中\"}",
+    "digest": "sha256:d4f62a7d31b70775aa8cd9abaa11843814a10869c32600c187f30720a94d9dae"
+  },
+  {
+    "name": "canonical/escaping",
+    "input": {
+      "path": "model/forward",
+      "ctl": "a\tb\nc\u001fd",
+      "q": "he said \"hi\"\\done"
+    },
+    "canonical": "{\"ctl\":\"a\\tb\\nc\\u001fd\",\"path\":\"model/forward\",\"q\":\"he said \\\"hi\\\"\\\\done\"}",
+    "digest": "sha256:5d9c9f30e54b127babb8891d2d0190ef310c01f8ebc56439cf8ed3fd9212f487"
+  },
+  {
+    "name": "tensor/float64-2x3",
+    "digest": "sha256:eea7fb056c9f5a6c5f8b9d0530e8a7d425ac1075c7f5ce52bdd2950bbe2a231c"
+  },
+  {
+    "name": "tensor/int32-4",
+    "digest": "sha256:7d4867aa7af9e352eef1491bb1c01d23d22cca89adeb08036d31498ba552872b"
+  },
+  {
+    "name": "tensor/int8-6",
+    "digest": "sha256:685ee43fd6ba87924144d034225aa4004d96f977e680537524a9371886474efe"
+  },
+  {
+    "name": "tensors/named-order-independent",
+    "digest": "sha256:71c0eaf694f0afbb917370624a1d530feeafe373a44045c51326eada54d957e4"
+  },
+  {
+    "name": "receipt/exact-profile",
+    "certificate": "sha256:2405c7e2044adc689a945187953807f5d29ab04cc8b6819e0879d7bbbfd96886",
+    "manifest_canonical": "{\"arithmetic\":{\"accumulation\":\"exact\",\"order_independent\":true,\"params\":{\"es\":3,\"frac_bits\":96,\"n\":16,\"quire_bits\":256},\"profile\":\"bposit16-quire256\"},\"computation\":{\"id\":\"conformance.identity\",\"version\":\"1\"},\"cr\":\"0.1\",\"digest_alg\":\"sha256\",\"input\":{\"digest\":\"sha256:ad6d749143dd8efa6c82957b639210e8e79e810c6884016ec6147710a0d07236\",\"n_tensors\":1},\"model\":{\"digest\":\"sha256:b82c1cad15bee4a3e136ce1524d1cd92f7b6ad921afb532a96afd42db59dbc50\",\"n_tensors\":1},\"output\":{\"digest\":\"sha256:eea7fb056c9f5a6c5f8b9d0530e8a7d425ac1075c7f5ce52bdd2950bbe2a231c\",\"shape\":[2,3]}}"
+  },
+  {
+    "name": "receipt/sampled",
+    "certificate": "sha256:4347a088dacde8bde54253a852049ca4da8fb40f432b37f675f22d6ee7f2b0ed",
+    "manifest_canonical": "{\"arithmetic\":{\"accumulation\":\"exact\",\"order_independent\":true,\"params\":{\"es\":3,\"frac_bits\":96,\"n\":16,\"quire_bits\":256},\"profile\":\"bposit16-quire256\"},\"computation\":{\"id\":\"conformance.sampled\",\"version\":\"1\"},\"cr\":\"0.1.1\",\"digest_alg\":\"sha256\",\"input\":{\"digest\":\"sha256:ad6d749143dd8efa6c82957b639210e8e79e810c6884016ec6147710a0d07236\",\"n_tensors\":1},\"model\":{\"digest\":\"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\",\"n_tensors\":0},\"output\":{\"digest\":\"sha256:f0459f0cac4bf677a363193590075c0f3ed84bf274b39e8098a6f5e4fe5b256f\",\"shape\":[16,4]},\"sample\":{\"challenge\":\"beef\",\"digest\":\"sha256:a37a87afcac42ca56635f4faaac997a741e44fa998a2940f7549a2310e89cfa1\",\"n_units\":16,\"rule\":\"sha256-ctr-reject-v1\",\"size\":4}}",
+    "sample_indices": [
+      2,
+      5,
+      8,
+      15
+    ]
+  },
+  {
+    "name": "receipt/chunk-0",
+    "certificate": "sha256:5c7e3dff976b8d6ae8c3db20e62ddbd5514bba60a07d81eb8fd4856540c8a01d",
+    "manifest_canonical": "{\"arithmetic\":{\"accumulation\":\"exact\",\"order_independent\":true,\"params\":{\"es\":3,\"frac_bits\":96,\"n\":16,\"quire_bits\":256},\"profile\":\"bposit16-quire256\"},\"chunk\":{\"closing\":false,\"index\":0,\"prev_certificate\":\"\"},\"computation\":{\"id\":\"conformance.chunked\",\"version\":\"1\"},\"cr\":\"0.1.2\",\"digest_alg\":\"sha256\",\"input\":{\"digest\":\"sha256:ad6d749143dd8efa6c82957b639210e8e79e810c6884016ec6147710a0d07236\",\"n_tensors\":1},\"model\":{\"digest\":\"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\",\"n_tensors\":0},\"output\":{\"digest\":\"sha256:eea7fb056c9f5a6c5f8b9d0530e8a7d425ac1075c7f5ce52bdd2950bbe2a231c\",\"shape\":[2,3]}}",
+    "chain_digest": "sha256:f9559c2de7bb1a2de20286777091ac6e4ee3972e15cf2a0f0fa7e4bdf6a369fd"
+  },
+  {
+    "name": "chain/closing-2chunk",
+    "certificate": "sha256:a47fc5a69a053b4554f5c0566bc0eb550040da0904e676a23eb32b2d5573faed",
+    "manifest_canonical": "{\"arithmetic\":{\"accumulation\":\"exact\",\"order_independent\":true,\"params\":{\"es\":3,\"frac_bits\":96,\"n\":16,\"quire_bits\":256},\"profile\":\"bposit16-quire256\"},\"chunk\":{\"chain_digest\":\"sha256:0a3e0b1fc1159709cd29aaa82da8bdb105e6400230c6fd69ee7142cd55ee517b\",\"closing\":true,\"index\":2,\"n_chunks\":2,\"prev_certificate\":\"sha256:4ecf4d9915a9bb498edbd1d746fe5a95211b72582910f267773150f8607bfb55\"},\"computation\":{\"id\":\"conformance.chunked\",\"version\":\"1\"},\"cr\":\"0.1.2\",\"digest_alg\":\"sha256\",\"input\":{\"digest\":\"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\",\"n_tensors\":0},\"model\":{\"digest\":\"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\",\"n_tensors\":0},\"output\":{\"digest\":\"sha256:eea7fb056c9f5a6c5f8b9d0530e8a7d425ac1075c7f5ce52bdd2950bbe2a231c\",\"shape\":[2,3]}}",
+    "chain_digest": "sha256:0a3e0b1fc1159709cd29aaa82da8bdb105e6400230c6fd69ee7142cd55ee517b"
+  },
+  {
+    "name": "refuse/profile-contradicts-registry",
+    "manifest_canonical": "{\"arithmetic\":{\"accumulation\":\"exact\",\"order_independent\":true,\"params\":{\"es\":3,\"frac_bits\":96,\"n\":16,\"quire_bits\":256},\"profile\":\"float64\"},\"computation\":{\"id\":\"conformance.identity\",\"version\":\"1\"},\"cr\":\"0.1\",\"digest_alg\":\"sha256\",\"input\":{\"digest\":\"sha256:ad6d749143dd8efa6c82957b639210e8e79e810c6884016ec6147710a0d07236\",\"n_tensors\":1},\"model\":{\"digest\":\"sha256:b82c1cad15bee4a3e136ce1524d1cd92f7b6ad921afb532a96afd42db59dbc50\",\"n_tensors\":1},\"output\":{\"digest\":\"sha256:eea7fb056c9f5a6c5f8b9d0530e8a7d425ac1075c7f5ce52bdd2950bbe2a231c\",\"shape\":[2,3]}}",
+    "certificate": "sha256:3b8c1517fa05f2c34f5e6af47284ad5015eeee9f5a38deedbed7284b73183257",
+    "expect_verdict": "MALFORMED",
+    "why": "arithmetic fields must match the registered profile (§6.1 rule 1); accepting this forges the ACCEPT reserved for exact arithmetic"
+  },
+  {
+    "name": "refuse/sample-space-shrunk",
+    "manifest_canonical": "{\"arithmetic\":{\"accumulation\":\"exact\",\"order_independent\":true,\"params\":{\"es\":3,\"frac_bits\":96,\"n\":16,\"quire_bits\":256},\"profile\":\"bposit16-quire256\"},\"computation\":{\"id\":\"conformance.sampled\",\"version\":\"1\"},\"cr\":\"0.1.1\",\"digest_alg\":\"sha256\",\"input\":{\"digest\":\"sha256:ad6d749143dd8efa6c82957b639210e8e79e810c6884016ec6147710a0d07236\",\"n_tensors\":1},\"model\":{\"digest\":\"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\",\"n_tensors\":0},\"output\":{\"digest\":\"sha256:f0459f0cac4bf677a363193590075c0f3ed84bf274b39e8098a6f5e4fe5b256f\",\"shape\":[16,4]},\"sample\":{\"challenge\":\"beef\",\"digest\":\"sha256:a37a87afcac42ca56635f4faaac997a741e44fa998a2940f7549a2310e89cfa1\",\"n_units\":4,\"rule\":\"sha256-ctr-reject-v1\",\"size\":4}}",
+    "certificate": "sha256:d52f762beb8002b2022f9ae961bcc060eb48015190d3b36723ce5d6c4204cf5a",
+    "expect_verdict": "MALFORMED",
+    "why": "sample.n_units must equal output.shape[0] (§10); accepting this reports full coverage while most units go unattested"
+  },
+  {
+    "name": "refuse/unknown-profile-not-accepted",
+    "manifest_canonical": "{\"arithmetic\":{\"accumulation\":\"exact\",\"order_independent\":true,\"params\":{\"es\":3,\"frac_bits\":96,\"n\":16,\"quire_bits\":256},\"profile\":\"vendor-unregistered-v0\"},\"computation\":{\"id\":\"conformance.identity\",\"version\":\"1\"},\"cr\":\"0.1\",\"digest_alg\":\"sha256\",\"input\":{\"digest\":\"sha256:ad6d749143dd8efa6c82957b639210e8e79e810c6884016ec6147710a0d07236\",\"n_tensors\":1},\"model\":{\"digest\":\"sha256:b82c1cad15bee4a3e136ce1524d1cd92f7b6ad921afb532a96afd42db59dbc50\",\"n_tensors\":1},\"output\":{\"digest\":\"sha256:eea7fb056c9f5a6c5f8b9d0530e8a7d425ac1075c7f5ce52bdd2950bbe2a231c\",\"shape\":[2,3]}}",
+    "certificate": "sha256:c14a3af34c9540574adf6b2a8ef2118e6c9b16656b2b877c6e9087374ef60ddd",
+    "expect_verdict": "UNVERIFIABLE",
+    "why": "a verifier cannot assess an order-independence claim for a profile it does not implement (§6.1 rule 2); ACCEPT would trust the prover"
+  },
+  {
+    "name": "refuse/output-digest-missing",
+    "manifest_canonical": "{\"arithmetic\":{\"accumulation\":\"exact\",\"order_independent\":true,\"params\":{\"es\":3,\"frac_bits\":96,\"n\":16,\"quire_bits\":256},\"profile\":\"bposit16-quire256\"},\"computation\":{\"id\":\"conformance.sampled\",\"version\":\"1\"},\"cr\":\"0.1.1\",\"digest_alg\":\"sha256\",\"input\":{\"digest\":\"sha256:ad6d749143dd8efa6c82957b639210e8e79e810c6884016ec6147710a0d07236\",\"n_tensors\":1},\"model\":{\"digest\":\"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\",\"n_tensors\":0},\"output\":{\"shape\":[16,4]},\"sample\":{\"challenge\":\"beef\",\"digest\":\"sha256:a37a87afcac42ca56635f4faaac997a741e44fa998a2940f7549a2310e89cfa1\",\"n_units\":16,\"rule\":\"sha256-ctr-reject-v1\",\"size\":4}}",
+    "certificate": "sha256:b19771a41dd6786034803333ee3c0654887f408e02727ea1ab95c1a81160bf7a",
+    "expect_verdict": "MALFORMED",
+    "why": "every bound section must carry a well-formed digest; a sampled receipt with no full-output digest would ACCEPT its sampled slice while never committing to the unsampled units, defeating §10"
+  },
+  {
+    "name": "refuse/cross-version-section",
+    "manifest_canonical": "{\"arithmetic\":{\"accumulation\":\"exact\",\"order_independent\":true,\"params\":{\"es\":3,\"frac_bits\":96,\"n\":16,\"quire_bits\":256},\"profile\":\"bposit16-quire256\"},\"chunk\":{\"closing\":false,\"index\":0,\"prev_certificate\":\"\"},\"computation\":{\"id\":\"conformance.sampled\",\"version\":\"1\"},\"cr\":\"0.1.1\",\"digest_alg\":\"sha256\",\"input\":{\"digest\":\"sha256:ad6d749143dd8efa6c82957b639210e8e79e810c6884016ec6147710a0d07236\",\"n_tensors\":1},\"model\":{\"digest\":\"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\",\"n_tensors\":0},\"output\":{\"digest\":\"sha256:f0459f0cac4bf677a363193590075c0f3ed84bf274b39e8098a6f5e4fe5b256f\",\"shape\":[16,4]},\"sample\":{\"challenge\":\"beef\",\"digest\":\"sha256:a37a87afcac42ca56635f4faaac997a741e44fa998a2940f7549a2310e89cfa1\",\"n_units\":16,\"rule\":\"sha256-ctr-reject-v1\",\"size\":4}}",
+    "certificate": "sha256:1920653b2f9403668b725b9ca3fc75359753cbaceb776854910683eda247c214",
+    "expect_verdict": "MALFORMED",
+    "why": "section exclusivity (§10): each version carries exactly its own optional section — a 0.1.1 receipt must not carry a chunk section. Not soundness-affecting (the cert rebinds the whole manifest), but leaving it unstated lets one verifier MALFORMED what another ACCEPTs"
+  }
+]

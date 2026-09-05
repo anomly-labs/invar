@@ -21,6 +21,7 @@ a certificate mismatch, a fork, or a gap is rejected at the door with the reason
 from __future__ import annotations
 
 import hashlib
+import base64
 import json
 import os
 import re
@@ -39,6 +40,7 @@ from urllib.parse import parse_qs, urlparse
 from .attest import AttestationBinding
 from .crcore import certificate_of, digest_bytes
 from .hwsign import verify_signature
+from .tlog import TransparencyLog
 from .license import TRUSTED_KEYS, check
 
 GENESIS = "sha256:" + "0" * 64
@@ -57,7 +59,10 @@ class LedgerStore:
     against the same tip and both append — a duplicated/forked chain in the
     custody log (found by an 8-thread race test, 2026-08-20; test in suite)."""
 
-    def __init__(self, root: str, trusted_key_ids: set | None = None):
+    def __init__(self, root: str, trusted_key_ids: set | None = None, signer=None):
+        self.signer = signer                    # Ledger's own key for SCITT statements
+        os.makedirs(root, exist_ok=True)
+        self.tlog = TransparencyLog(os.path.join(root, "tlog.b64"))   # statements registry
         # fleet-pinned device signing keys (LEDGER_TRUSTED_KEYS); None = accept any
         # key that verifies, but a signature that is PRESENT must always verify
         self.trusted_key_ids = trusted_key_ids
@@ -180,16 +185,77 @@ def make_handler(store: LedgerStore, token: str, collector: dict):
             if u.path == "/health":
                 return self._json(200, {"ok": True, "role": "invar-ledger",
                                         "licensee": collector["licensee"]})
+            if u.path.startswith("/v1/tlog/"):
+                if not self._authed():
+                    return self._json(401, {"error": "auth"})
+                q = parse_qs(u.query)
+                try:
+                    if u.path == "/v1/tlog/head":
+                        return self._json(200, store.tlog.head())
+                    if u.path == "/v1/tlog/inclusion":
+                        return self._json(200, store.tlog.inclusion(int(q.get("index", ["-1"])[0])))
+                    if u.path == "/v1/tlog/consistency":
+                        return self._json(200, store.tlog.consistency(int(q.get("old_size", ["-1"])[0])))
+                    if u.path == "/v1/tlog/leaf":
+                        idx = int(q.get("index", ["-1"])[0])
+                        return self._json(200, {"index": idx, "statement_b64":
+                                                base64.b64encode(store.tlog.leaf(idx)).decode()})
+                except (IndexError, ValueError):
+                    return self._json(404, {"error": "no such index"})
+                return self._json(404, {"error": "not found"})
             if u.path == "/v1/export":
                 if not self._authed():
                     return self._json(401, {"error": "auth"})
-                dev = (parse_qs(u.query).get("device") or [""])[0]
+                q = parse_qs(u.query)
+                dev = (q.get("device") or [""])[0]
                 if not _DEV_RE.match(dev):
                     return self._json(400, {"error": "bad device id"})
-                return self._json(200, store.export(dev, collector))
+                packet = store.export(dev, collector)
+                fmt = (q.get("format") or ["json"])[0]
+                if fmt == "scitt":
+                    # SCITT-style Signed Statement over the certified packet: payload =
+                    # canonical packet manifest, CWT sub = packet certificate, signed by
+                    # the Ledger's signer (LEDGER_SIGNER / --signer, TPM or software).
+                    if store.signer is None:
+                        return self._json(409, {"error": "ledger has no signer "
+                                                "(start with --signer software|tpm2)"})
+                    from .scitt import signed_statement
+                    entry = {"manifest": packet["packet"],
+                             "certificate": packet["packet_certificate"]}
+                    st = signed_statement(entry, store.signer,
+                                          collector.get("issuer", "invar-ledger"))
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/cose; cose-type=\"cose-sign1\"")
+                    self.send_header("Content-Length", str(len(st)))
+                    self.send_header("X-Invar-Signer-Key-Id", store.signer.key_id)
+                    if (q.get("register") or ["0"])[0] == "1":
+                        # register the statement in the transparency log; the inclusion
+                        # receipt travels in a header so the caller can verify offline
+                        rcpt = store.tlog.append(st)
+                        self.send_header("X-Invar-Tlog-Receipt",
+                                         base64.b64encode(json.dumps(rcpt, separators=(",", ":"),
+                                                                     sort_keys=True).encode()).decode())
+                    self.end_headers()
+                    self.wfile.write(st)
+                    return
+                return self._json(200, packet)
             self._json(404, {"error": "not found"})
 
         def do_POST(self):
+            if self.path == "/v1/tlog/register":
+                if not self._authed():
+                    return self._json(401, {"error": "auth"})
+                try:
+                    n = int(self.headers.get("Content-Length", "0"))
+                    if n > 1_000_000:
+                        return self._json(413, {"error": "too large"})
+                    body = json.loads(self.rfile.read(n))
+                    st = base64.b64decode(body["statement_b64"])
+                    if not st or st[0] != 0xD2:
+                        return self._json(400, {"error": "not a tagged COSE_Sign1"})
+                    return self._json(200, store.tlog.append(st))
+                except Exception as e:
+                    return self._json(400, {"error": f"bad request: {e}"})
             if urlparse(self.path).path != "/v1/worldline/ingest":
                 return self._json(404, {"error": "not found"})
             if not self._authed():
@@ -213,6 +279,21 @@ def make_handler(store: LedgerStore, token: str, collector: dict):
     return Handler
 
 
+def store_from_env() -> "LedgerStore":
+    """LEDGER_DIR, LEDGER_TRUSTED_KEYS (comma-separated key_ids), LEDGER_SIGNER
+    (software | tpm2 | tpm2:sha256:0,7) with keys under INVAR_STATE (default ~/.invar)."""
+    tk = os.environ.get("LEDGER_TRUSTED_KEYS", "").strip()
+    signer = None
+    if os.environ.get("LEDGER_SIGNER"):
+        from .hwsign import make_signer
+        state = os.environ.get("INVAR_STATE", os.path.expanduser("~/.invar"))
+        os.makedirs(state, mode=0o700, exist_ok=True)
+        signer = make_signer(os.environ["LEDGER_SIGNER"], state)
+    return LedgerStore(os.environ.get("LEDGER_DIR", "ledger-data"),
+                       trusted_key_ids={k.strip() for k in tk.split(",") if k.strip()} or None,
+                       signer=signer)
+
+
 def main():
     lic_path = os.environ.get("INVAR_LICENSE", "")
     trusted = TRUSTED_KEYS + ([os.environ["INVAR_TRUST_PUB"]]
@@ -227,10 +308,9 @@ def main():
         print("invar-ledger: set LEDGER_TOKEN (shared agent token)",
               file=sys.stderr)
         sys.exit(2)
-    tk = os.environ.get("LEDGER_TRUSTED_KEYS", "").strip()
-    store = LedgerStore(os.environ.get("LEDGER_DIR", "ledger-data",
-                        trusted_key_ids={k.strip() for k in tk.split(",") if k.strip()} or None))
-    collector = {"licensee": lic.email, "tier": lic.tier, "seats": lic.seats}
+    store = store_from_env()
+    collector = {"licensee": lic.email, "tier": lic.tier, "seats": lic.seats,
+                 "issuer": os.environ.get("LEDGER_ISSUER", f"invar-ledger:{lic.email}")}
     host = os.environ.get("HOST", "127.0.0.1")   # expose deliberately, behind TLS
     port = int(os.environ.get("PORT", "8579"))
     print(f"INVAR Ledger on {host}:{port}  licensee={lic.email} "

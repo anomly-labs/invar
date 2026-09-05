@@ -102,6 +102,18 @@ specification — public spec, published conformance vectors, independent
 implementations. Verification is a property of the format, not a feature we
 gatekeep.
 
+## Verify from another language
+
+`go/crverify` is an independent Go implementation of the receipt format: canonical form,
+certificate, chain, attestation binding, and signature checks. It reproduces every
+published CR-v0.1 conformance vector byte-for-byte and accepts or rejects the same
+worldlines the Python verifier does, so a client written in Go — an OpenPCC client, for
+instance — can check an INVAR receipt without trusting the Python reference.
+
+```
+cd go/crverify && go test ./... && go run ./cmd/invar-verify worldline.jsonl -attest binding.json -require-signature
+```
+
 ## Tests
 
 The full battery runs **offline** — no model, GPU, or network. Deterministic

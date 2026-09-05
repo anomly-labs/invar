@@ -117,3 +117,33 @@ separated key_ids) pins which device keys the fleet accepts.
 - The PCR-bank binding is unsigned evidence. It is labelled as such.
 - None of this hides prompts from the operator of the machine. Confidentiality is a
   TEE property; INVAR composes with one, it does not replace one.
+
+
+## 6. Signed Statements and the transparency log
+
+Any entry can be enveloped as a SCITT-style Signed Statement (COSE_Sign1, RFC 9052):
+payload = the canonical manifest (digests only), CWT subject = the certificate, signed by
+the worldline's software or TPM key (EdDSA or ES256).
+
+```
+invar scitt sign worldline.jsonl --issuer did:web:yourco.example --out-dir statements
+invar scitt verify statements/entry-0.cose --pubkey statements/signer.pem
+```
+
+The Ledger keeps an append-only transparency log of statements (RFC 6962 Merkle tree,
+the construction SCITT registries use). Registering returns an inclusion receipt; the
+registrant can check it offline forever, and anyone with two tree heads can check the
+log only ever appended:
+
+```
+curl -H 'Authorization: Bearer $TOKEN' -X POST http://ledger:8579/v1/tlog/register \
+     -d '{"statement_b64": "<base64 COSE_Sign1>"}'          # -> {index, tree_size, root, path}
+curl -H 'Authorization: Bearer $TOKEN' "http://ledger:8579/v1/export?device=box1&format=scitt&register=1" -o packet.cose
+#   (X-Invar-Tlog-Receipt header carries the inclusion receipt, base64 JSON)
+invar tlog check packet.cose receipt.json                    # ACCEPT — inclusion proof verifies
+invar tlog consistency old_head.json proof.json              # ACCEPT — append-only between heads
+```
+
+Because statements carry digests only, a public log of computations leaks no prompts
+and no answers. It proves that a receipt existed, signed by a given key, no later than
+the tree head that includes it.

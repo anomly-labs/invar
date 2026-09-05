@@ -1,0 +1,10 @@
+{
+ "evidence_digest": "sha256:cd4890bcb12f62276886bf585ba759db781311a845ffa9c09733a95b96157757",
+ "evidence_path": "pcr-bank.json",
+ "genesis": "sha256:9ebfae42eb278b954674e573377de53057c229b54ceb4534bd52d8b62d030c5e",
+ "kind": "tpm-pcr-bank",
+ "nonce": "e102c813d4f58a878a6d87948f5c3428",
+ "verdict_digest": null,
+ "verdict_path": null,
+ "verifier": "sysfs-unsigned"
+}

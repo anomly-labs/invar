@@ -77,6 +77,10 @@ class SoftwareSigner:
             serialization.PublicFormat.SubjectPublicKeyInfo).decode()
         self.key_id = _key_id(self.pubkey_pem)
 
+    def sign_raw(self, msg: bytes) -> bytes:
+        """Raw Ed25519 signature over arbitrary bytes (COSE Sig_structure etc.)."""
+        return self._key.sign(msg)
+
     def sign(self, entry: dict) -> dict:
         sig = self._key.sign(_chain_bytes(entry))
         return {"backend": self.backend, "alg": "Ed25519", "key_id": self.key_id,
@@ -102,8 +106,8 @@ class TPM2Signer:
         self.bin = tools_bin or os.environ.get("INVAR_TPM2_BIN") or os.path.dirname(
             shutil.which("tpm2_sign") or "/usr/bin/tpm2_sign")
         self.env = dict(os.environ)
-        if tcti or os.environ.get("TPM2TOOLS_TCTI"):
-            self.env["TPM2TOOLS_TCTI"] = tcti or os.environ["TPM2TOOLS_TCTI"]
+        self.env["TPM2TOOLS_TCTI"] = (tcti or os.environ.get("TPM2TOOLS_TCTI")
+                                      or "device:/dev/tpmrm0")
         os.makedirs(state_dir, mode=0o700, exist_ok=True)
         self._p = lambda n: os.path.join(state_dir, n)
         self._provision()
@@ -139,8 +143,12 @@ class TPM2Signer:
         self._run("tpm2_readpublic", "-c", self._p("key.ctx"), "-f", "pem",
                   "-o", self._p("key.pem"))
 
-    def sign(self, entry: dict) -> dict:
-        digest = hashlib.sha256(_chain_bytes(entry)).digest()
+    def sign_raw(self, msg: bytes) -> bytes:
+        """ECDSA P-256 over sha256(msg) inside the TPM; returns raw r||s (64 bytes),
+        the COSE ES256 wire form."""
+        return self._sign_digest(hashlib.sha256(msg).digest())
+
+    def _sign_digest(self, digest: bytes) -> bytes:
         with tempfile.TemporaryDirectory() as td:
             dpath, spath = os.path.join(td, "d.bin"), os.path.join(td, "s.bin")
             with open(dpath, "wb") as f:
@@ -159,7 +167,10 @@ class TPM2Signer:
                     subprocess.run([os.path.join(self.bin, "tpm2_flushcontext"), sess],
                                    env=self.env, capture_output=True)
             with open(spath, "rb") as f:
-                raw = f.read()                 # plain = r || s, 32 bytes each
+                return f.read()                # plain = r || s, 32 bytes each
+
+    def sign(self, entry: dict) -> dict:
+        raw = self._sign_digest(hashlib.sha256(_chain_bytes(entry)).digest())
         r, s = int.from_bytes(raw[:32], "big"), int.from_bytes(raw[32:], "big")
         der = encode_dss_signature(r, s)
         return {"backend": self.backend, "alg": "ECDSA-P256-SHA256",

@@ -66,6 +66,14 @@ trusts only pinned digests and the certificate math.
   (GPU freed, driver change, laptop on battery). Pin `--num-gpu` when the box
   is not static. The failure mode is an honest REJECT ("re-execution output
   digest differs"), never a false ACCEPT.
+- R12 Profiles state their guarantee: `llamacpp-pinned-reexec-v0` / `ollama-pinned-
+  reexec-v0` reproduce on the pinned deployment only; `llamacpp-bposit8-quire-v0` is
+  chosen automatically when the GGUF's file_type is b-posit8 (42, llama-cpp-et) and
+  certifies that every matmul ran through the exact 256-bit quire, so the arithmetic
+  is order-independent and re-executable across implementations. It does NOT make the
+  sampler, tokenizer, or prompt template cross-implementation; those are pinned by the
+  runtime digest as before. Quality is the 8-bit tier (see the mosyne-bposit
+  whitepaper limits), not a bf16 substitute.
 - R10 Attestation binding verifies nothing about the evidence itself: INVAR records
   the digests of the evidence and of an external verifier's verdict (snpguest,
   nvtrust/NRAS, Veraison...) and binds the chain to them. If the operator ran no

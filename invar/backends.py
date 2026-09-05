@@ -39,7 +39,9 @@ import urllib.error
 import urllib.request
 
 LLAMACPP_PROFILE = "llamacpp-pinned-reexec-v0"
+LLAMACPP_EXACT_PROFILE = "llamacpp-bposit8-quire-v0"
 OLLAMA_PROFILE = "ollama-pinned-reexec-v0"
+GGUF_FTYPE_BPOSIT8 = 42          # LLAMA_FTYPE_MOSTLY_BPOSIT8 in llama-cpp-et
 DEFAULT_OLLAMA_HOST = "http://127.0.0.1:11434"
 
 
@@ -49,6 +51,50 @@ def file_digest(path: str) -> str:
         for chunk in iter(lambda: f.read(1 << 20), b""):
             h.update(chunk)
     return "sha256:" + h.hexdigest()
+
+
+# --------------------------------------------------------------------------- GGUF sniffing
+
+_GGUF_TYPES = {0: ("B", 1), 1: ("b", 1), 2: ("H", 2), 3: ("h", 2), 4: ("I", 4), 5: ("i", 4),
+               6: ("f", 4), 7: ("?", 1), 10: ("Q", 8), 11: ("q", 8), 12: ("d", 8)}
+
+
+def gguf_file_type(path: str) -> int | None:
+    """Read `general.file_type` from a GGUF v2/v3 header (stdlib, streams only the KV
+    section). Returns None if the file is not GGUF or the key is absent."""
+    import struct
+    try:
+        with open(path, "rb") as f:
+            if f.read(4) != b"GGUF":
+                return None
+            ver, = struct.unpack("<I", f.read(4))
+            if ver < 2:
+                return None
+            n_tensors, n_kv = struct.unpack("<QQ", f.read(16))
+
+            def rd_str():
+                n, = struct.unpack("<Q", f.read(8))
+                return f.read(n).decode("utf-8", "replace")
+
+            def rd_val(t):
+                if t == 8:
+                    return rd_str()
+                if t == 9:
+                    et, = struct.unpack("<I", f.read(4))
+                    cnt, = struct.unpack("<Q", f.read(8))
+                    return [rd_val(et) for _ in range(cnt)]
+                fmt, sz = _GGUF_TYPES[t]
+                return struct.unpack("<" + fmt, f.read(sz))[0]
+
+            for _ in range(n_kv):
+                key = rd_str()
+                t, = struct.unpack("<I", f.read(4))
+                val = rd_val(t)
+                if key == "general.file_type":
+                    return int(val)
+    except (OSError, struct.error, KeyError, UnicodeDecodeError):
+        return None
+    return None
 
 
 # --------------------------------------------------------------------------- llama.cpp
@@ -82,20 +128,34 @@ def run_llamacpp(binary: str, model: str, prompt: str,
 
 
 class LlamaCppBackend:
-    profile = LLAMACPP_PROFILE
+    """profile is chosen from the MODEL: a GGUF whose file_type is b-posit8 (42) runs
+    every matmul through the exact 256-bit quire in llama-cpp-et, so its receipts carry
+    the `llamacpp-bposit8-quire-v0` profile — arithmetic that is order-independent by
+    construction, hence re-executable across implementations, not just on the pinned
+    deployment. Any other GGUF gets the deployment-pinned profile. The profile is
+    certified in the manifest, so a verifier always knows which guarantee it holds."""
     name = "llamacpp"
 
-    def __init__(self, binary: str, model: str, threads: int = 4):
+    def __init__(self, binary: str, model: str, threads: int = 4,
+                 profile: str | None = None):
         self.binary, self.model, self.threads = binary, model, threads
+        if profile is None:
+            ft = gguf_file_type(model) if model and os.path.exists(model) else None
+            profile = LLAMACPP_EXACT_PROFILE if ft == GGUF_FTYPE_BPOSIT8 else LLAMACPP_PROFILE
+        self.profile = profile
+        self.file_type = gguf_file_type(model) if model and os.path.exists(model) else None
 
     @property
     def model_name(self) -> str:
         return os.path.basename(self.model)
 
     def deployment(self) -> dict:
-        return {"runtime_digest": file_digest(self.binary),
-                "model_digest": file_digest(self.model),
-                "model_name": self.model_name}
+        d = {"runtime_digest": file_digest(self.binary),
+             "model_digest": file_digest(self.model),
+             "model_name": self.model_name}
+        if self.file_type is not None:
+            d["gguf_file_type"] = self.file_type
+        return d
 
     def params(self, n_predict: int, seed: int) -> dict:
         return {"n_predict": n_predict, "seed": seed,
@@ -241,4 +301,5 @@ def make_backend(kind: str, model: str, *, binary: str | None = None,
 
 
 def backend_for_profile(profile: str):
-    return {LLAMACPP_PROFILE: "llamacpp", OLLAMA_PROFILE: "ollama"}.get(profile)
+    return {LLAMACPP_PROFILE: "llamacpp", LLAMACPP_EXACT_PROFILE: "llamacpp",
+            OLLAMA_PROFILE: "ollama"}.get(profile)
