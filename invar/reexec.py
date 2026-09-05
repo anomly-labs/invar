@@ -108,8 +108,8 @@ class BP8Matrix:
         raw = np.frombuffer(g.tensor_bytes(name), dtype=np.uint8).reshape(n_out, nb, 1 + QK)
         self.se = raw[:, :, 0].view(np.int8).astype(np.int64)            # [n_out, nb]
         codes = raw[:, :, 1:]                                             # [n_out, nb, 32]
-        self.M = _LUT_M[codes]                                            # [n_out, nb, 32]
-        self.E = _LUT_E[codes]
+        self.M = _LUT_M[codes].astype(np.int16)                           # [n_out, nb, 32]; |M| <= 31
+        self.E = _LUT_E[codes].astype(np.int8)                            # 3 bytes per weight: 7B fits in ~21 GB
         self.n_out, self.K, self.nb = n_out, K, nb
 
     def dot(self, x: np.ndarray) -> np.ndarray:
@@ -118,8 +118,8 @@ class BP8Matrix:
         xse = np.array([b[0] for b in xq], dtype=np.int64)               # [nb]
         xc = np.array([b[1] for b in xq], dtype=np.int64)                # [nb, 32]
         xM, xE = _LUT_M[xc], _LUT_E[xc]
-        P = self.M * xM[None, :, :]                                       # [n_out, nb, 32], |P| < 2^10
-        SH = self.E + xE[None, :, :] + (self.se + xse[None, :])[:, :, None] + QFRAC
+        P = self.M.astype(np.int64) * xM[None, :, :]                      # [n_out, nb, 32], |P| < 2^10
+        SH = self.E.astype(np.int64) + xE[None, :, :] + (self.se + xse[None, :])[:, :, None] + QFRAC
         return _accumulate(P, SH, self.n_out)
 
 
