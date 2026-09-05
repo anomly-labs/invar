@@ -75,6 +75,9 @@ signed by a key that lives inside a TPM 2.0, optionally bound to a PCR policy so
 modified boot cannot mint receipts. INVAR records the vendor verifier's verdict; it
 does not replace it. Boundary and setup: [docs/ATTESTATION.md](docs/ATTESTATION.md).
 
+Under the exact profile a receipt no longer depends on where it ran: minted on a GPU, it
+re-executes on a CPU with the same output digest (`invar verify --cross-deployment`).
+
 ## What a receipt proves — and what it doesn't
 
 A receipt proves that **this runtime + these weights + this prompt + these
@@ -105,13 +108,13 @@ gatekeep. One page on what each layer proves and what none of them do:
 
 ## What the exact profile costs
 
-Honest numbers, same binary, SmolLM2-135M. CPU, 4 threads: q8_0 decodes at roughly
-350–430 tokens/s, F32 at ~97, the exact b-posit8 quire path at ~33 (about 11× against
-q8_0, because the exact path is scalar while q8_0 is SIMD). RTX 5090 with the CUDA
-exact kernel: q8_0 ~1,160 tokens/s, exact ~114 (10×, launch-bound at this size), every
-matmul re-executed bit-exactly by the CPU-side verifiers. Use it where the guarantee is
-worth more than the throughput: small models, audit re-execution, and the spot-checks
-below, where 100 tokens/s is plenty.
+Honest numbers, SmolLM2-135M, the deterministic fork binary, 8 CPU threads: on an
+RTX 5090 the exact b-posit8 path decodes at ~102 tokens/s against q8_0 at ~458; on the
+CPU, ~49 against ~150. About 3–4× at this size, and the exact path is launch-bound on
+the GPU. What you get for it: the same bits on the CPU and on the GPU, every layer, every
+logit, the text ([docs/DETERMINISTIC-GRAPH.md](docs/DETERMINISTIC-GRAPH.md)), and every
+matmul re-executable by an independent verifier. Use it where the guarantee is worth more
+than the throughput: small models, audit re-execution, and the spot-checks below.
 
 ## Check the arithmetic yourself
 

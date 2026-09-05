@@ -29,9 +29,10 @@ implementations that agree byte-for-byte.
 
 Profiles say what re-execution means: `llamacpp-pinned-reexec-v0` and
 `ollama-pinned-reexec-v0` reproduce on the pinned deployment; `llamacpp-bposit8-quire-v0`
-accumulates every matmul in an exact 256-bit quire, so the arithmetic is order-independent
-and reproduces across implementations and hardware (CPU and CUDA kernels, both
-re-executed bit-exactly by the Python and Go verifiers).
+accumulates every matmul in an exact 256-bit quire and runs every other op through a
+deterministic elementwise library, so the whole graph is bit-identical on the CPU and on
+CUDA (DETERMINISTIC-GRAPH.md) and every matmul re-executes under the Python and Go
+verifiers.
 
 ## 2. Worldline — that the record was not edited
 

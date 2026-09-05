@@ -203,12 +203,13 @@ invar verify worldline.jsonl --binary llama-cli --model model-bposit8.gguf --dev
 ```
 
 The compute device and the number of offloaded layers are part of the deployment pin
-(`device`, `n_gpu_layers` in the manifest): a receipt minted on CUDA0 does not
-re-execute as ACCEPT on the CPU, because the float elementwise ops differ between the
-two, while every matmul under the exact profile is re-executable from either dump. Use
-`--device none` to pin a CPU-only run on a machine that has a GPU; with a CUDA build
-and no `--device`, llama.cpp may offload batched prefill ops on its own, which is a
-deployment property you did not pin.
+(`device`, `n_gpu_layers` in the manifest). Under the exact profile the whole graph is
+bit-identical between the CPU and CUDA (docs/DETERMINISTIC-GRAPH.md), so a receipt minted
+on CUDA0 re-executes on the CPU with `invar verify --cross-deployment`; without the flag
+the pin is enforced, and float-profile receipts never cross. Use `--device none` to pin a
+CPU-only run on a machine that has a GPU; with a CUDA build and no `--device`, llama.cpp
+may offload batched prefill ops on its own, which is a deployment property you did not
+pin. New receipts also certify `flash_attn: off` (the exact attention path).
 
 ## What every client gets, and what none of them get
 

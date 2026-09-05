@@ -213,7 +213,8 @@ def sec_worldline(tmp):
     check("build_entry manifest shape",
           m["cr"] == "0.1" and m["profile"] == WL.PROFILE
           and m["computation"]["kind"] == "llm-decode"
-          and m["computation"]["params"] == {"n_predict": 12, "seed": 1, "threads": 4, "temp": 0}
+          and m["computation"]["params"] == {"n_predict": 12, "seed": 1, "threads": 4, "temp": 0,
+                                             "flash_attn": "off"}
           and m["inputs"]["prompt"] == digest_bytes(b"hello world")
           and m["outputs"]["text"] == digest_bytes(b"the-output"))
     check("build_entry certificate binds manifest", e["certificate"] == certificate_of(m))
@@ -1617,6 +1618,30 @@ def sec_device_pin(tmp, art):
     code, out = run_cli(["invar", "verify", wl.path, "--binary", binA, "--model", model,
                          "--device", "none", "--ngl", "0"])
     check("cli verify --device none on a GPU worldline: REJECT", code == 1)
+    # cross-deployment: only the EXACT profile may re-execute across differing pins
+    import struct as _st
+    from invar.backends import GGUF_FTYPE_BPOSIT8, LLAMACPP_EXACT_PROFILE
+    gg = os.path.join(tmp, "device_exact.gguf")
+    with open(gg, "wb") as f:
+        f.write(b"GGUF" + _st.pack("<I", 3) + _st.pack("<QQ", 0, 2))
+        k = b"general.architecture"; f.write(_st.pack("<Q", len(k)) + k + _st.pack("<I", 8))
+        v = b"llama"; f.write(_st.pack("<Q", len(v)) + v)
+        k = b"general.file_type"; f.write(_st.pack("<Q", len(k)) + k + _st.pack("<I", 4) + _st.pack("<I", GGUF_FTYPE_BPOSIT8))
+    gpu_x = LlamaCppBackend(binA, gg, device="CUDA0", n_gpu_layers=99)
+    cpu_x = LlamaCppBackend(binA, gg, device="none", n_gpu_layers=0)
+    wlx = Worldline(os.path.join(tmp, "device_exact_wl.jsonl"))
+    wlx.infer(gpu_x, "device pin", n_predict=4)
+    res = verify_entries(wlx.path, pr, {LLAMACPP_EXACT_PROFILE: cpu_x})
+    check("exact GPU receipt on CPU without the flag: REJECT (pin)", not res[0][1] and "device" in res[0][2])
+    res = verify_entries(wlx.path, pr, {LLAMACPP_EXACT_PROFILE: cpu_x}, cross_deployment=True)
+    check("exact GPU receipt on CPU with cross_deployment: re-executed ACCEPT, differing pins reported",
+          res[0][1] and "CROSS-DEPLOYMENT" in res[0][2] and "device" in res[0][2] and "n_gpu_layers" in res[0][2])
+    res = verify_entries(wl.path, pr, {LLAMACPP_PROFILE: cpu}, cross_deployment=True)
+    check("float-profile GPU receipt with cross_deployment: still REJECT (no cross-hardware claim)",
+          not res[0][1] and "device" in res[0][2])
+    code, out = run_cli(["invar", "verify", wlx.path, "--binary", binA, "--model", gg,
+                         "--device", "none", "--ngl", "0", "--cross-deployment"])
+    check("cli verify --cross-deployment: ACCEPT", code == 0 and "CROSS-DEPLOYMENT" in out)
 
 
 def main():

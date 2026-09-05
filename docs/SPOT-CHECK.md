@@ -146,15 +146,12 @@ rejected by both when every row is challenged. Decode on an RTX 5090: exact 114 
 against q8_0 1,160 tok/s (10×, launch-bound at this model size); the CPU exact path is
 60 tok/s on 8 threads.
 
-Two things this does **not** change. The float elementwise ops (RMSNorm, RoPE, SiLU,
-softmax) are still computed by the device's float kernels, so a GPU run and a CPU run
-of the same prompt are two different deployments: their dumps differ from the first
-norm row by an ulp, while every matmul in each dump re-executes bit-exactly from that
-dump's own inputs. INVAR therefore pins the device: `--device none` (CPU) or
-`--device CUDA0 --ngl 99`, certified as `device` and `n_gpu_layers` in the manifest and
-required to match at re-execution. And the CPU-vs-GPU boundary is the next target: with
-correctly-rounded float32 transcendentals on both sides the whole graph would be
-bit-identical across hardware, not only its matmuls.
+Later the same day the boundary moved again: with deterministic elementwise ops on both
+backends (`ggml-det`: exact norm sums, deterministic exp/trig, exact float16 attention,
+softmax with exact sums; flash attention off) the **whole graph** is bit-identical between
+the CPU and the GPU, every row of every layer and the text. See DETERMINISTIC-GRAPH.md.
+INVAR still certifies `device` and `n_gpu_layers`; `invar verify --cross-deployment`
+re-executes exact-profile receipts across that pin.
 
 ### The block-scale rule is integer-exact
 

@@ -71,6 +71,10 @@ def main():
                         "certified deployment: none = CPU only, or e.g. CUDA0)")
     v.add_argument("--ngl", type=int, default=None,
                    help="llama.cpp layers offloaded to --device (must match the receipt)")
+    v.add_argument("--cross-deployment", action="store_true",
+                   help="exact-profile entries: re-execute even if the certified runtime/"
+                        "device/n_gpu_layers differ from this verifier's (the exact graph is "
+                        "deterministic across CPU and CUDA); differing pins are reported")
     v.add_argument("--no-reexecute", action="store_true",
                    help="structural + chain checks only")
     v.add_argument("--attest", default=None,
@@ -293,7 +297,8 @@ def main():
     results = verify_entries(a.worldline, prompts, backends, reexecute=reexec,
                              binding=binding,
                              trusted_key_ids=set(a.trust_key) if a.trust_key else None,
-                             require_signature=a.require_signature)
+                             require_signature=a.require_signature,
+                             cross_deployment=a.cross_deployment)
     if a.spot_check:
         import secrets
         from .spotcheck import dump_digest, verify_dump

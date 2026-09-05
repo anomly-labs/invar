@@ -27,7 +27,7 @@ import os
 import threading
 import time
 
-from .backends import (LLAMACPP_PROFILE, LlamaCppBackend, file_digest,  # noqa: F401
+from .backends import (LLAMACPP_PROFILE, LLAMACPP_EXACT_PROFILE, LlamaCppBackend, file_digest,  # noqa: F401
                        run_llamacpp)
 from .attest import NONE as ATTEST_NONE, AttestationBinding, check_binding  # noqa: F401
 from .hwsign import verify_signature
@@ -146,13 +146,19 @@ class Worldline:
 def verify_entries(path: str, prompts: dict[str, str], backends: dict,
                    reexecute: bool = True, binding=None,
                    trusted_key_ids: set[str] | None = None,
-                   require_signature: bool = False) -> list:
+                   require_signature: bool = False,
+                   cross_deployment: bool = False) -> list:
     """Verify every entry: certificate matches its canonical manifest, the chain
     links, and (if reexecute) the pinned computation reproduces the output digest.
     `prompts` maps prompt digest -> prompt text for re-execution.
     `backends` maps profile -> backend instance, or -> factory(model_name) that
     builds one per model named in the receipts (a worldline may mix profiles and
-    models; an entry whose profile has no backend gets structural checks only)."""
+    models; an entry whose profile has no backend gets structural checks only).
+    `cross_deployment`: for EXACT-profile entries, re-execute even when the certified
+    deployment pins (runtime, device, n_gpu_layers) differ from the verifier's — the
+    exact profile's whole graph is deterministic across CPU and CUDA, so the output
+    digest must still match; the differing pins are reported in the reason. Float
+    profiles keep the pin regardless."""
     results = []
     prev = binding.genesis() if binding else Worldline.GENESIS
     live: dict[str, dict] = {}       # (profile, model) -> deployment(), once
@@ -198,13 +204,19 @@ def verify_entries(path: str, prompts: dict[str, str], backends: dict,
                     dep = live[key]
                     diff = [k for k in PIN_KEYS
                             if k in comp and comp[k] != dep.get(k)]
-                    if diff:
+                    crossing = bool(diff) and cross_deployment and \
+                        m.get("profile") == LLAMACPP_EXACT_PROFILE
+                    if diff and not crossing:
                         ok, why = False, ("deployment differs "
                                           f"({', '.join(diff)})")
                     else:
                         out = be.generate(prompts[pd], comp["params"])
                         if digest_bytes(out.encode()) != m["outputs"]["text"]:
-                            ok, why = False, "re-execution output digest differs"
+                            ok, why = False, ("re-execution output digest differs"
+                                              + (f" (cross-deployment: {', '.join(diff)} differ)" if crossing else ""))
+                        elif crossing:
+                            why = ("re-executed CROSS-DEPLOYMENT, output digest matches "
+                                   f"(certified {', '.join(diff)} differ from this verifier's)")
                         else:
                             why = "re-executed, output digest matches"
             if ok and binding is None and m.get("computation", {}).get(
