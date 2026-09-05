@@ -171,7 +171,9 @@ replaces ggml's table-based one on both backends), per-layer RoPE bases with sli
 layers, and a prompt that llama.cpp feeds in chunks: byte-identical across the two binaries at
 25 tok/s exact, Go reference 2,267/2,267 rows in 6 s, Python 2,260/2,260, and its full GPU dump
 (2,661 lines) is byte-identical to the CPU's. Four model families: SmolLM2, Llama 3, Qwen2.5 and
-Gemma 3.
+Gemma 3. And at production size: **Mistral-7B-Instruct-v0.3** in b-posit8 (7.5 GB) is
+byte-identical across the two x86 binaries (1,644 dump lines) at 3.7 tok/s exact on 24 threads,
+and the Go reference reproduces all 1,353 rows and logits of its dump in 186 s.
 
 So the exact profile is no longer defined by a binary; EXACT-PROFILE-SPEC.md writes it down
 as a specification a fourth implementation can be built from. Two independent implementations,
