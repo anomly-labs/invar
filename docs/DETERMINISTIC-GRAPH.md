@@ -68,7 +68,10 @@ Decode at 128 tokens, 8 CPU threads, this fork's binary (deterministic everywher
 | | exact b-posit8 | q8_0 (same binary) |
 |---|---|---|
 | RTX 5090 | 102 tok/s | 458 tok/s |
-| x86 CPU | 49 tok/s | 150 tok/s |
+| x86 CPU | 49 tok/s (later 55 after two kernel rounds) | 150 tok/s |
+
+Larger models on the CPU, 16 threads, after the evening's two kernel rounds: Llama-3.2-1B
+decodes at 15.8 tok/s exact and SmolLM2-1.7B at 11.0 tok/s.
 
 At a 600-token context on the CPU (8 threads, SmolLM2-135M) the exact path decodes at
 37 tok/s against q8_0 at 75 in the same binary: attention dominates both and both use the
