@@ -63,6 +63,41 @@ that runs on the host, run the container on the host network:
 
 ---
 
+## vLLM, SGLang, TGI — any OpenAI-compatible engine you operate (pinned profile)
+
+INVAR sits in front of the engine as an OpenAI-compatible proxy and receipts every answer:
+
+```
+invar serve --backend openai --upstream-url http://localhost:8000 --model qwen3-coder-30b \
+            --weights-dir /models/qwen3-coder-30b --image-digest sha256:<engine image> --port 8577
+invar verify worldline.jsonl --upstream-url http://localhost:8000
+```
+
+Profile `openai-upstream-pinned-v0`. The receipt pins the served model id, the engine and its
+version (vLLM `/version`, SGLang `/get_server_info`, TGI `/info`; or the container image digest
+you pass), and the weights digest when `--weights-dir` points at the checkpoint directory
+(otherwise the receipt says `model_digest_kind: identifier`, which is weaker, and says so).
+Requests are sent at temperature 0 with a fixed seed. **Verification is same-deployment
+replay**: the verifier re-sends the certified prompt to the same deployment and the output
+digest must match; a different engine version or weights digest is reported as "deployment
+differs". This profile does NOT claim cross-hardware bit-identity: float kernels do not have
+it. Batch-invariant kernels make this profile stronger on one deployment; the exact profile
+(b-posit8 on the deterministic llama.cpp fork) is the one that is re-executable anywhere.
+
+## Closed models behind a provider API (witness profile)
+
+```
+INVAR_UPSTREAM_API_KEY=... invar serve --backend witness --upstream-url https://api.example.com \
+            --model <provider model id> --signer software --port 8577
+```
+
+Profile `openai-upstream-witness-v0`. Closed weights cannot be re-executed by anyone, so this
+is a **provenance record, not a proof**: a signed, hash-chained receipt of every call (prompt
+and output digests, provider host, model id, parameters, timestamp; the provider's response id
+and `system_fingerprint` are captured beside it). `invar verify` checks structure, chain and
+signatures and states that the entries were not re-executed. Use it for the audit trail; do
+not describe it as verified inference.
+
 ## Open WebUI
 
 Open WebUI lists models from `GET /v1/models` and streams by default; INVAR
@@ -184,6 +219,24 @@ the returned message. Two ways to get it:
 - Or read `worldline.jsonl` directly; it is append-only JSON lines.
 
 ---
+
+## Pi coding agent (tool-using agent, every turn receipted)
+
+[Pi](https://pi.dev) is a terminal coding agent with read/write/edit/bash tools. Point it at
+INVAR with the shipped extension and every model call in the agent loop — including the turns
+that decide to call a tool — becomes a re-executable receipt:
+
+```bash
+invar serve --model ./model.gguf --device CUDA0 --ngl 99        # :8577
+pi -e integrations/pi/invar_provider.js --provider invar --model invar/local \
+   "create hello.py that prints hello, then run it"
+invar verify worldline.jsonl --reexec                              # every turn re-executed
+```
+
+`tools` in the request are rendered into the model's own chat template by INVAR and the run is
+certified raw, so the receipt covers the exact transcript the model saw; the model's tool call
+comes back as OpenAI `tool_calls`. Details and limits: [TOOL-CALLING.md](TOOL-CALLING.md).
+Scripted use with tools on: add `< /dev/null` (Pi reads stdin when tools are enabled).
 
 ## curl
 

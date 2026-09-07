@@ -3,7 +3,11 @@
 invar.serve — OpenAI-compatible local endpoint where every completion
 carries its worldline receipt. Stdlib only.
 
-  POST /v1/chat/completions   {model?, messages:[{role,content}...], max_tokens?, stream?}
+  POST /v1/chat/completions   {model?, messages:[{role,content}...], max_tokens?, stream?, tools?}
+      tools present (or tool/tool_calls turns in messages) -> the Qwen2.5 chat template with
+      the tools block is rendered HERE and run raw (params.chat="raw", certified), the
+      model's <tool_call> JSON is returned as OpenAI `tool_calls` (finish_reason
+      "tool_calls"); the receipt covers the exact rendered transcript.
       -> OpenAI-shaped response + "receipt": {certificate, chain, profile, manifest}
          stream=true -> SSE: one content chunk, one finish chunk (carrying the
          receipt), then [DONE]. The receipt covers the WHOLE output, so the
@@ -29,6 +33,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import threading
 import time
 import uuid
@@ -42,6 +47,197 @@ from .hwsign import make_signer
 from .worldline import Worldline
 
 _lock = threading.Lock()
+
+_QWEN_SYS = "You are Qwen, created by Alibaba Cloud. You are a helpful assistant."
+
+
+def _render_chatml(msgs: list, tools: list | None) -> str:
+    """Qwen2.5 chat template (tools variant), rendered here so the receipt covers the exact
+    transcript the model saw. Mirrors tokenizer_config.json's Jinja: tools block in the system
+    turn, assistant tool calls as <tool_call> JSON, tool results inside a user turn as
+    <tool_response>, generation prompt appended. tojson == Jinja's htmlsafe_json_dumps (sorted keys,
+    < > & ' escaped as \\uXXXX) — what HF apply_chat_template produced for the model's SFT data."""
+    def tj(o):                     # Jinja's `tojson` (htmlsafe_json_dumps): sorted keys + the four HTML escapes
+        return (json.dumps(o, sort_keys=True, ensure_ascii=False).replace("<", "\\u003c")
+                .replace(">", "\\u003e").replace("&", "\\u0026").replace("'", "\\u0027"))
+    out = []
+    first_sys = msgs[0].get("content") if msgs and msgs[0].get("role") == "system" else None
+    sys_text = _text_of(msgs[0]) if first_sys is not None else _QWEN_SYS
+    if tools:
+        out.append("<|im_start|>system\n" + sys_text +
+                   "\n\n# Tools\n\nYou may call one or more functions to assist with the user query.\n\n"
+                   "You are provided with function signatures within <tools></tools> XML tags:\n<tools>" +
+                   "".join("\n" + tj(t) for t in tools) +
+                   "\n</tools>\n\nFor each function call, return a json object with function name and arguments "
+                   "within <tool_call></tool_call> XML tags:\n<tool_call>\n{\"name\": <function-name>, "
+                   "\"arguments\": <args-json-object>}\n</tool_call><|im_end|>\n")
+    else:
+        out.append("<|im_start|>system\n" + sys_text + "<|im_end|>\n")
+    for i, m in enumerate(msgs):
+        role = m.get("role")
+        if role == "system" and i == 0:
+            continue
+        if role == "tool":
+            prev_tool = i > 0 and msgs[i - 1].get("role") == "tool"
+            next_tool = i + 1 < len(msgs) and msgs[i + 1].get("role") == "tool"
+            out.append(("" if prev_tool else "<|im_start|>user") + "\n<tool_response>\n" + _neutralise_control(_text_of(m)) +
+                       "\n</tool_response>" + ("" if next_tool else "<|im_end|>\n"))
+        elif role == "assistant" and m.get("tool_calls"):
+            seg = "<|im_start|>assistant"
+            if _text_of(m):
+                seg += "\n" + _text_of(m)
+            for tc in m["tool_calls"]:
+                fn = tc.get("function", tc)
+                args = fn.get("arguments", {})
+                if isinstance(args, str):
+                    try:
+                        args = json.loads(args)
+                    except Exception:
+                        pass
+                seg += "\n<tool_call>\n{\"name\": \"" + str(fn.get("name")) + "\", \"arguments\": " + tj(args) + "}\n</tool_call>"
+            out.append(seg + "<|im_end|>\n")
+        else:
+            body = _neutralise_control(_text_of(m)) if role == "user" else _text_of(m)
+            out.append("<|im_start|>" + str(role) + "\n" + body + "<|im_end|>\n")
+    out.append("<|im_start|>assistant\n")
+    return "".join(out)
+
+
+_ZWSP = "\u200b"
+
+
+def _neutralise_control(text: str) -> str:
+    """Untrusted content (user turns, tool results) must not be able to forge a turn: in raw mode
+    the transcript is tokenised with special tokens honoured, so a tool result containing
+    `<|im_start|>system` (or `<|start_header_id|>`, `[INST]`-style markers) would become control
+    tokens. A zero-width space after the opening bracket keeps the text readable and makes it
+    tokenise as plain text. The receipt covers the neutralised transcript — what the model saw."""
+    if not text:
+        return text
+    return text.replace("<|", "<" + _ZWSP + "|").replace("[INST]", "[" + _ZWSP + "INST]").replace("[/INST]", "[" + _ZWSP + "/INST]")
+
+
+def _hf_messages(msgs: list) -> list:
+    """OpenAI messages -> the HF chat-template view (tool_calls arguments as dicts); user and
+    tool content neutralised against control-token injection."""
+    out = []
+    for m in msgs:
+        m = dict(m)
+        if m.get("role") in ("user", "tool") and isinstance(m.get("content"), str):
+            m["content"] = _neutralise_control(m["content"])
+        if m.get("tool_calls"):
+            tcs = []
+            for tc in m["tool_calls"]:
+                fn = dict(tc.get("function", tc))
+                if isinstance(fn.get("arguments"), str):
+                    try:
+                        fn["arguments"] = json.loads(fn["arguments"])
+                    except Exception:
+                        pass
+                tcs.append({**tc, "function": fn})
+            m["tool_calls"] = tcs
+        if m.get("content") is None:
+            m["content"] = ""
+        out.append(m)
+    return out
+
+
+def _render_with_template(template: str, msgs: list, tools: list | None, tokens: dict) -> str | None:
+    """Render with the MODEL'S OWN chat template (any family: Qwen, Llama 3.x, Mistral, ...) via
+    Jinja2, the same engine HF used to build its SFT data. None when jinja2 is unavailable or the
+    template fails, in which case the caller falls back to the Qwen hand-render."""
+    try:
+        import jinja2
+        import datetime as _dt
+        env = jinja2.Environment(trim_blocks=True, lstrip_blocks=True)
+        env.globals["strftime_now"] = lambda fmt: _dt.date.today().strftime(fmt)
+        env.globals["raise_exception"] = lambda msg: (_ for _ in ()).throw(ValueError(msg))
+        return env.from_string(template).render(messages=_hf_messages(msgs), tools=tools or None,
+                                                add_generation_prompt=True, **tokens)
+    except Exception:
+        return None
+
+
+def _gguf_template(path: str) -> tuple[str | None, dict]:
+    """The GGUF's tokenizer.chat_template and its bos/eos token strings (header read only)."""
+    try:
+        from .spotcheck import GGUF
+        kv = GGUF(path).kv
+        toks = kv.get("tokenizer.ggml.tokens") or []
+        def tk(key):
+            i = int(kv.get(key, -1))
+            return toks[i] if 0 <= i < len(toks) else ""
+        return kv.get("tokenizer.chat_template"), {"bos_token": tk("tokenizer.ggml.bos_token_id"),
+                                                    "eos_token": tk("tokenizer.ggml.eos_token_id")}
+    except Exception:
+        return None, {}
+
+
+_TC_RX = re.compile(r"<tool_call>\s*(\{.*?\})\s*</tool_call>", re.S)
+_MISTRAL_RX = re.compile(r"\[TOOL_CALLS\]\s*(\[.*?\])", re.S)
+_LLAMA_TAG = "<|python_tag|>"
+
+
+def _parse_tool_calls(text: str) -> tuple[str | None, list]:
+    """Split the model's text into (content, OpenAI tool_calls). Unparseable blocks stay as content."""
+    calls = []
+    def _sub(m):
+        try:
+            obj = json.loads(m.group(1))
+            name, args = obj["name"], obj.get("arguments", {})
+        except Exception:
+            return m.group(0)
+        calls.append({"id": "call_" + uuid.uuid4().hex[:24], "type": "function",
+                      "function": {"name": str(name),
+                                   "arguments": args if isinstance(args, str) else json.dumps(args)}})
+        return ""
+    content = _TC_RX.sub(_sub, text).strip()
+
+    def _add(obj):
+        name = obj.get("name")
+        if not isinstance(name, str):                        # Llama-3.2-1B habit: {"function": "write", ...}
+            name = obj.get("function") if isinstance(obj.get("function"), str) else None
+        args = obj.get("arguments", obj.get("parameters", {}))
+        if not name:
+            return False
+        calls.append({"id": "call_" + uuid.uuid4().hex[:24], "type": "function",
+                      "function": {"name": str(name), "arguments": args if isinstance(args, str) else json.dumps(args)}})
+        return True
+    if not calls and content:
+        m = _MISTRAL_RX.search(content)                      # Mistral: [TOOL_CALLS] [{"name":..,"arguments":..}]
+        if m:
+            try:
+                if all(_add(o) for o in json.loads(m.group(1)) if isinstance(o, dict)) and calls:
+                    content = (content[:m.start()] + content[m.end():]).strip()
+            except Exception:
+                calls.clear()
+        if not calls and _LLAMA_TAG in content:               # Llama 3.x: <|python_tag|>{"name":..,"parameters":..}
+            body = content.split(_LLAMA_TAG, 1)[1].strip()
+            try:
+                objs = json.loads(body)
+                objs = objs if isinstance(objs, list) else [objs]
+                if all(_add(o) for o in objs if isinstance(o, dict)) and calls:
+                    content = content.split(_LLAMA_TAG, 1)[0].strip()
+            except Exception:
+                calls.clear()
+    if not calls and content:
+        # lenient fallback: small models often answer with ONE bare or ```json-fenced
+        # {"name":..., "arguments":{...}} object instead of the <tool_call> tags
+        body = re.sub(r"^```(?:json)?\s*|\s*```$", "", content.strip(), flags=re.S).strip()
+        if (body.startswith("{") and body.endswith("}")) or (body.startswith("[") and body.endswith("]")):
+            # repair: Python-style triple-quoted string values ("""...""") inside the JSON object
+            body = re.sub(r'"""(.*?)"""', lambda m: json.dumps(m.group(1)), body, flags=re.S)
+            try:
+                obj = json.loads(body)
+                objs = obj if isinstance(obj, list) else [obj]
+                if objs and all(isinstance(o, dict) and (isinstance(o.get("name"), str) or isinstance(o.get("function"), str))
+                                and ("arguments" in o or "parameters" in o) for o in objs):
+                    for o in objs:
+                        _add(o)
+                    content = ""
+            except Exception:
+                pass
+    return (content or None), calls
 
 
 class _Server(ThreadingHTTPServer):
@@ -98,6 +294,8 @@ def make_handler(wl: Worldline, binary: str | None = None,
         backend = LlamaCppBackend(binary, model)
     model_name = backend.model_name
     profile = backend.profile
+    _tpl, _tpl_tokens = (_gguf_template(backend.model) if getattr(backend, "model", None)
+                         and os.path.exists(str(getattr(backend, "model", ""))) else (None, {}))
 
     class Handler(BaseHTTPRequestHandler):
         def _json(self, code: int, obj) -> None:
@@ -108,12 +306,17 @@ def make_handler(wl: Worldline, binary: str | None = None,
             self.end_headers()
             self.wfile.write(body)
 
-        def _sse(self, events: list) -> None:
+        def _sse_open(self) -> None:
             self.send_response(200)
             self.send_header("Content-Type", "text/event-stream")
             self.send_header("Cache-Control", "no-cache")
             self.send_header("Connection", "close")
             self.end_headers()
+            self._sse_opened = True
+
+        def _sse(self, events: list) -> None:
+            if not getattr(self, "_sse_opened", False):
+                self._sse_open()
             for ev in events:
                 data = ev if isinstance(ev, str) else json.dumps(ev)
                 self.wfile.write(f"data: {data}\n\n".encode())
@@ -165,7 +368,17 @@ def make_handler(wl: Worldline, binary: str | None = None,
                     return self._json(413, {"error": "request too large"})
                 req = json.loads(self.rfile.read(clen))
                 msgs = req.get("messages") or []
-                prompt = "\n".join(t for t in (_text_of(m) for m in msgs) if t)
+                tools = req.get("tools") or None
+                agentic = bool(tools) or any(m.get("role") == "tool" or m.get("tool_calls") for m in msgs)
+                if agentic:
+                    # tool use needs the real chat template (tools block, tool_call/tool_response turns);
+                    # rendered here and run raw so the receipt digests the exact transcript.
+                    prompt = (_render_with_template(_tpl, msgs, tools, _tpl_tokens) if _tpl else None) \
+                        or _render_chatml(msgs, tools)
+                    chat_mode = "raw"
+                else:
+                    prompt = "\n".join(t for t in (_text_of(m) for m in msgs) if t)
+                    chat_mode = None
                 if not prompt:
                     return self._json(400, {"error": "empty prompt"})
                 n = min(max(int(req.get("max_tokens")
@@ -173,8 +386,39 @@ def make_handler(wl: Worldline, binary: str | None = None,
                             1), 4096)
                 if len(prompt) > 32_768:
                     return self._json(400, {"error": "prompt too long (32k max)"})
-                with _lock:                             # one pinned run at a time
-                    text, entry = wl.infer(backend, prompt, n_predict=n)
+                if req.get("stream"):
+                    # open the stream NOW and heartbeat while the pinned run executes: a slow
+                    # (CPU, exact-profile) run must not trip the client's idle timeout; the
+                    # receipt still covers the whole output, delivered as one chunk at the end.
+                    self._sse_open()
+                    box: dict = {}
+
+                    def _run():
+                        try:
+                            with _lock:                     # one pinned run at a time
+                                box["r"] = wl.infer(backend, prompt, n_predict=n, chat=chat_mode)
+                        except Exception as ex:             # noqa: BLE001 — surfaced on the stream below
+                            box["e"] = ex
+                    th = threading.Thread(target=_run, daemon=True)
+                    th.start()
+                    while th.is_alive():
+                        th.join(10)
+                        if th.is_alive():
+                            try:
+                                self.wfile.write(b": keepalive\n\n")
+                                self.wfile.flush()
+                            except OSError:                 # client went away; the run finishes and is receipted anyway
+                                th.join()
+                                return
+                    if "e" in box:
+                        self._sse([{"error": str(box["e"])}, "[DONE]"])
+                        return
+                    text, entry = box["r"]
+                else:
+                    with _lock:                             # one pinned run at a time
+                        text, entry = wl.infer(backend, prompt, n_predict=n, chat=chat_mode)
+                content, tool_calls = _parse_tool_calls(text) if agentic else (text, [])
+                finish = "tool_calls" if tool_calls else "stop"
                 _push_to_ledger(entry)                  # best-effort, never blocks the answer
                 receipt = {"certificate": entry["certificate"],
                            "chain": entry["chain"],
@@ -198,32 +442,41 @@ def make_handler(wl: Worldline, binary: str | None = None,
                 if req.get("stream"):
                     head = {"id": rid, "object": "chat.completion.chunk",
                             "created": now, "model": model_name}
+                    delta = {"role": "assistant", "content": content}
+                    if tool_calls:
+                        delta["tool_calls"] = [{"index": i, **tc} for i, tc in enumerate(tool_calls)]
                     self._sse([
-                        {**head, "choices": [{"index": 0, "finish_reason": None,
-                                              "delta": {"role": "assistant",
-                                                        "content": text}}]},
-                        {**head, "choices": [{"index": 0, "finish_reason": "stop",
+                        {**head, "choices": [{"index": 0, "finish_reason": None, "delta": delta}]},
+                        {**head, "choices": [{"index": 0, "finish_reason": finish,
                                               "delta": {}}],
                          "usage": usage, "receipt": receipt},
                         "[DONE]",
                     ])
                     return
+                message = {"role": "assistant", "content": content}
+                if tool_calls:
+                    message["tool_calls"] = tool_calls
                 self._json(200, {
                     "id": rid, "object": "chat.completion", "created": now,
                     "model": model_name,
-                    "choices": [{"index": 0, "finish_reason": "stop",
-                                 "message": {"role": "assistant",
-                                             "content": text}}],
+                    "choices": [{"index": 0, "finish_reason": finish,
+                                 "message": message}],
                     "usage": usage,
                     "receipt": receipt,
                 })
             except Exception as e:                      # surface, don't hide
-                self._json(500, {"error": str(e)})
+                if getattr(self, "_sse_opened", False):
+                    try:
+                        self._sse([{"error": str(e)}, "[DONE]"])
+                    except OSError:
+                        pass
+                else:
+                    self._json(500, {"error": str(e)})
     return Handler
 
 
 def add_backend_args(ap: argparse.ArgumentParser) -> None:
-    ap.add_argument("--backend", choices=["auto", "llamacpp", "ollama"],
+    ap.add_argument("--backend", choices=["auto", "llamacpp", "ollama", "openai", "witness"],
                     default="auto",
                     help="auto = gguf path -> llamacpp, anything else -> ollama")
     ap.add_argument("--binary", default=None,
@@ -231,6 +484,16 @@ def add_backend_args(ap: argparse.ArgumentParser) -> None:
                          "ollama binary to hash as the runtime pin (INVAR_OLLAMA_BIN)")
     ap.add_argument("--ollama-host", default=None,
                     help="Ollama server (default OLLAMA_HOST or http://127.0.0.1:11434)")
+    ap.add_argument("--upstream-url", default=None,
+                    help="openai/witness backends: base URL of an OpenAI-compatible endpoint "
+                         "(vLLM/SGLang/TGI you operate -> 'openai' = pinned, replayable; a closed "
+                         "provider -> 'witness' = provenance record only). Key: INVAR_UPSTREAM_API_KEY")
+    ap.add_argument("--weights-dir", default=None,
+                    help="openai backend: local checkpoint directory of the served model; its "
+                         "digest becomes the receipt's weights_digest (otherwise an identifier only)")
+    ap.add_argument("--image-digest", default=None,
+                    help="openai backend: container image digest of the engine (sha256:...) to pin "
+                         "the runtime by image rather than by version string")
     ap.add_argument("--num-ctx", type=int, default=2048,
                     help="Ollama context size to pin (default 2048)")
     ap.add_argument("--num-gpu", type=int, default=None,
@@ -248,7 +511,10 @@ def add_backend_args(ap: argparse.ArgumentParser) -> None:
 def backend_from_args(a, model: str):
     return make_backend(a.backend, model, binary=a.binary, host=a.ollama_host,
                         threads=a.threads, num_ctx=a.num_ctx, num_gpu=a.num_gpu,
-                        device=a.device, n_gpu_layers=a.ngl)
+                        device=a.device, n_gpu_layers=a.ngl,
+                        upstream_url=getattr(a, "upstream_url", None),
+                        weights_dir=getattr(a, "weights_dir", None),
+                        image_digest=getattr(a, "image_digest", None))
 
 
 def main():

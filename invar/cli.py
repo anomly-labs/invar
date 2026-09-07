@@ -26,8 +26,29 @@ import sys
 
 from .attest import AttestationBinding
 from .backends import (LLAMACPP_EXACT_PROFILE, LLAMACPP_PROFILE, OLLAMA_PROFILE,
+                       UPSTREAM_PINNED_PROFILE, UPSTREAM_WITNESS_PROFILE, OpenAIUpstreamBackend,
                        LlamaCppBackend, OllamaBackend)
 from .worldline import digest_bytes, verify_entries
+
+
+def _certified_pin(worldline: str):
+    """(device flag, n_gpu_layers) certified by the first llama.cpp entry, or None. The receipt
+    stores the device DESCRIPTION ("none", or "CUDA0: NVIDIA ..."); the flag is its id."""
+    try:
+        with open(worldline) as f:
+            for line in f:
+                try:
+                    c = json.loads(line)["manifest"]["computation"]
+                except Exception:
+                    continue
+                dev = c.get("device")
+                if dev is None:
+                    return None
+                flag = "none" if dev == "none" else dev.split(":", 1)[0]
+                return flag, c.get("n_gpu_layers")
+    except OSError:
+        return None
+    return None
 
 
 def _profiles(path: str) -> set[str]:
@@ -35,7 +56,8 @@ def _profiles(path: str) -> set[str]:
         return {json.loads(line)["manifest"].get("profile", "") for line in f}
 
 
-def _tokenisation_note(model: str, dump: str, prompt_text: str | None, unix_time: int | None) -> str:
+def _tokenisation_note(model: str, dump: str, prompt_text: str | None, unix_time: int | None,
+                       chat: str | None = None) -> str:
     """'; tokenisation: ...' — whether the certified prompt re-tokenises to the certified ids
     (byte-level BPE vocabularies; dated templates use the receipt's day)."""
     import datetime
@@ -54,7 +76,7 @@ def _tokenisation_note(model: str, dump: str, prompt_text: str | None, unix_time
         return "; tokenisation: not checked (dump carries no positions)"
     day = datetime.datetime.fromtimestamp(unix_time, datetime.timezone.utc).date() if unix_time else None
     try:
-        got = tok.prompt_ids(prompt_text, now=day)
+        got = tok.prompt_ids(prompt_text, now=day, chat=chat)
     except Exception as e:                       # noqa: BLE001 — a template we cannot render is a finding, not a crash
         return f"; tokenisation: not checked (template: {str(e)[:80]})"
     if got == want:
@@ -127,6 +149,12 @@ def main():
                         "binary to hash for Ollama entries (INVAR_OLLAMA_BIN)")
     v.add_argument("--model", default=None,
                    help="gguf path (llama.cpp entries) or Ollama tag override")
+    v.add_argument("--upstream-url", default=None,
+                   help="openai-upstream entries: base URL of the SAME deployment for replay")
+    v.add_argument("--weights-dir", default=None,
+                   help="openai-upstream entries: checkpoint dir whose digest the receipts pin")
+    v.add_argument("--image-digest", default=None,
+                   help="openai-upstream entries: engine image digest the receipts pin")
     v.add_argument("--ollama-host", default=None,
                    help="Ollama server for Ollama entries (default OLLAMA_HOST "
                         "or http://127.0.0.1:11434)")
@@ -343,6 +371,15 @@ def main():
         seen = _profiles(a.worldline)
         if LLAMACPP_PROFILE in seen or LLAMACPP_EXACT_PROFILE in seen:
             if a.binary and a.model:
+                if a.device is None and a.ngl is None and not a.cross_deployment:
+                    # default the deployment pin to what the receipts certify (a receipt made
+                    # with --device none is otherwise REJECTED as "deployment differs" by a
+                    # verifier that did not repeat the flag)
+                    pin = _certified_pin(a.worldline)
+                    if pin:
+                        a.device, a.ngl = pin
+                        print(f"deployment pin taken from the receipts: device={a.device} ngl={a.ngl} "
+                              f"(pass --device/--ngl to override)", file=sys.stderr)
                 kw = dict(device=a.device, n_gpu_layers=a.ngl)
                 be = LlamaCppBackend(a.binary, a.model, **kw)
                 backends[LLAMACPP_PROFILE] = LlamaCppBackend(a.binary, a.model,
@@ -353,6 +390,19 @@ def main():
                 print("llama.cpp entries: re-execution needs --binary and "
                       "--model; running structural checks on them only",
                       file=sys.stderr)
+        if UPSTREAM_PINNED_PROFILE in seen:
+            url = a.upstream_url or os.environ.get("INVAR_UPSTREAM_URL")
+            if url:
+                override = a.model if (a.model and not os.path.exists(a.model)) else None
+                backends[UPSTREAM_PINNED_PROFILE] = lambda tag: OpenAIUpstreamBackend(
+                    override or tag, url, weights_dir=a.weights_dir, image_digest=a.image_digest)
+            else:
+                print("openai-upstream entries: same-deployment replay needs --upstream-url; "
+                      "running structural checks on them only", file=sys.stderr)
+        if UPSTREAM_WITNESS_PROFILE in seen:
+            print("witness entries (closed model behind an API): a provenance record, not "
+                  "re-executable by anyone; checking structure, chain and signatures only",
+                  file=sys.stderr)
         if OLLAMA_PROFILE in seen:
             # one backend per model tag named in the receipts (--model overrides)
             override = a.model if (a.model and not os.path.exists(a.model)) else None
@@ -429,7 +479,8 @@ def main():
                         pt = e.get("prompt_text")
                         if pt is not None and digest_bytes(pt.encode()) != e["manifest"]["inputs"]["prompt"]:
                             pt = None
-                        why += _tokenisation_note(a.model, path, pt, e["manifest"].get("unix_time"))
+                        why += _tokenisation_note(a.model, path, pt, e["manifest"].get("unix_time"),
+                                                  e["manifest"].get("computation", {}).get("params", {}).get("chat"))
             elif ok and e["manifest"].get("profile") == LLAMACPP_EXACT_PROFILE:
                 why += "; spot-check: no dump certified for this entry"
             new_results.append((i, ok, why))

@@ -212,6 +212,17 @@ a fragment at the start or right after a special token). All five models re-toke
 identically to the runtime; the published vectors (`go/crverify/testdata/tokenizer-vectors.json`)
 carry each prompt and its ids.
 
+## Build requirement (found 2026-09-06)
+
+llama.cpp's top-level build enables `GGML_LLAMAFILE` by default, and llamafile's tinyBLAS then
+computes the f16 attention matmuls (KQ, KQV) with FMA float accumulation, bypassing the exact
+f16 dot. A default build of the fork therefore diverged from the profile at the first attention
+output, and differed again between generic-x86-64 and AVX2/AVX-512 builds; the Go reference
+rejected those dumps (470/1437 rows). The fork's CMake now forces llamafile, BLAS/Accelerate,
+Metal, Vulkan, KleidiAI, HIP, SYCL and OpenCL off unless `-DANOMLY_ALLOW_INEXACT_BACKENDS=ON`
+is given, so a default build at any ISA or compiler is in the profile. Builds of the fork older
+than that commit must be configured with `-DGGML_LLAMAFILE=OFF -DGGML_BLAS=OFF`.
+
 ## Scope and limits
 
 - Verified on x86-64 (AVX2, 1/4/16 threads, two different binaries), an RTX 5090, and an

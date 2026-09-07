@@ -37,6 +37,10 @@ def main():
         return 0
 
     prompt = _arg("-p", "")
+    # like llama-cli: without --no-escape the prompt's \n, \t, \", \\ sequences are rewritten before
+    # tokenising (and echoing); the backend must pass --no-escape so the raw prompt is used
+    if "--no-escape" not in sys.argv:
+        prompt = prompt.encode("utf-8").decode("unicode_escape")
     seed = _arg("--seed", "0")
     n = int(_arg("-n", "128") or "128")
 
@@ -56,7 +60,12 @@ def main():
     out.write("main: build = fake (llama.cpp stand-in)\n")
     out.write("system_info: n_threads = " + (_arg("-t", "4") or "4") + "\n")
     if not os.environ.get("FAKE_LLAMA_NOECHO"):
-        out.write("> " + prompt + "\n")
+        # like tools/cli/cli-ui.h: prompts over 500 BYTES are echoed truncated
+        raw = prompt.encode("utf-8")
+        if len(raw) > 500:
+            out.write("> " + raw[:500].decode("utf-8", "ignore") + " ... (truncated)\n")
+        else:
+            out.write("> " + prompt + "\n")
     out.write(gen + "\n")
     # stats line: numbers deliberately vary run-to-run, like real llama.cpp
     jitter = hashlib.sha1(os.urandom(8)).hexdigest()[:4]

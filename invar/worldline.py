@@ -119,12 +119,15 @@ class Worldline:
             self.tip = entry["chain"]
 
     def infer(self, backend, prompt: str, n_predict: int = 128,
-              seed: int = 1, deployment: dict | None = None) -> tuple[str, dict]:
+              seed: int = 1, deployment: dict | None = None,
+              chat: str | None = None) -> tuple[str, dict]:
         """Run the pinned computation on `backend`, receipt it, append it.
         `deployment` may be passed to reuse digests computed once at startup
         (hashing a multi-GB gguf per request would be silly; the digests are
         re-read at verify time regardless)."""
         params = backend.params(n_predict, seed)
+        if chat:
+            params["chat"] = chat              # certified: verify re-executes in the same mode
         output = backend.generate(prompt, params)
         entry = build_entry_for(backend, prompt, output, params, self.tip,
                                 deployment, self.host_attestation)

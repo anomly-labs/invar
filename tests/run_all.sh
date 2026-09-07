@@ -13,6 +13,7 @@ cd "$(dirname "$0")/.."
 
 echo "===== INVAR unit suite (offline, fake llama-cli) ====="
 python3 tests/unit_tests.py
+python3 tests/test_tools.py
 
 echo
 echo "===== INVAR integration smokes ====="
@@ -55,6 +56,9 @@ python3 tests/test_cr_conformance.py || rc=$?
 echo
 echo "===== INVAR exact profile: detmath conformance, reference re-execution, tokenizer (skip without their optional deps/models) ====="
 python3 tests/test_detmath.py || rc=$?
+
+echo "== upstream backend (pinned / witness profiles) =="
+python3 tests/test_upstream_backend.py || rc=$?
 python3 tests/test_reexec_fixture.py || rc=$?
 python3 tests/test_tokenizer_models.py || rc=$?
 exit $rc

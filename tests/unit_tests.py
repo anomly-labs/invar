@@ -240,6 +240,20 @@ def sec_worldline(tmp):
     check("run_inference missing echo -> RuntimeError",
           raises(RuntimeError, run_inference, binA, model, "x"))
     del os.environ["FAKE_LLAMA_NOECHO"]
+    # llama-cli echoes prompts over 500 bytes truncated (" ... (truncated)"); the parser must
+    # still find the generation (regression: every HumanEval-sized prompt got a 500 before)
+    long_prompt = "def f(x):\n    \"\"\"" + ("word " * 130) + "\"\"\"\n"
+    check("run_inference handles the truncated echo of a >500-byte prompt",
+          len(long_prompt.encode()) > 500 and "[ Prompt:" not in run_inference(binA, model, long_prompt)
+          and run_inference(binA, model, long_prompt) == run_inference(binA, model, long_prompt))
+
+    # llama-cli rewrites backslash escapes inside -p by default; the backend passes --no-escape so
+    # the raw prompt is what runs and what is echoed (regression: HumanEval/51 quotes "abc\\ndef",
+    # every eval row stalled on it with "could not locate prompt echo")
+    esc_prompt = 'def f():\n    """\n    >>> f("abc\\ndef")\n    \'bcdf\\nghjklm\'\n    """\n'
+    check("run_inference keeps backslash escapes in the prompt verbatim (--no-escape)",
+          "\\n" in esc_prompt and "[ Prompt:" not in run_inference(binA, model, esc_prompt)
+          and run_inference(binA, model, esc_prompt).startswith("The answer is"))
 
     # Worldline append / chain / reload
     wlp = os.path.join(tmp, "wl.jsonl")

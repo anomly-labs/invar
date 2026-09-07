@@ -144,8 +144,18 @@ class BPETokenizer:
         return env.from_string(tpl).render(messages=messages, add_generation_prompt=add_generation_prompt,
                                            bos_token=bos, eos_token=eos, tools=None)
 
-    def prompt_ids(self, prompt: str, now: datetime.date | None = None) -> list[int]:
-        """The token ids llama-cli feeds for `-p prompt` in single-turn chat mode."""
+    def prompt_ids(self, prompt: str, now: datetime.date | None = None, chat: str | None = None) -> list[int]:
+        """The token ids llama-cli feeds for `-p prompt` in single-turn chat mode; chat="raw"
+        (receipt params.chat) means the runtime used the identity template: the prompt verbatim.
+
+        Receipt integrity is unaffected by the mode: the receipt's prompt_text is always the exact
+        string the runtime tokenised (a bare user prompt in the default mode, a fully rendered
+        transcript in raw mode) and params.chat is certified, so re-execution and this
+        re-tokenisation check both use the same mode the runtime did."""
+        if chat == "raw":
+            # the identity Jinja template drops exactly one trailing newline from its output
+            # (measured: "...assistant\n" -> 13 ids, "...assistant\n\n" -> one \n kept)
+            return self.encode(prompt[:-1] if prompt.endswith("\n") else prompt)
         return self.encode(self.render_chat([{"role": "user", "content": prompt}], True, now))
 
 

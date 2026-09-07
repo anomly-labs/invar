@@ -41,6 +41,8 @@ import urllib.request
 LLAMACPP_PROFILE = "llamacpp-pinned-reexec-v0"
 LLAMACPP_EXACT_PROFILE = "llamacpp-bposit8-quire-v0"
 OLLAMA_PROFILE = "ollama-pinned-reexec-v0"
+UPSTREAM_PINNED_PROFILE = "openai-upstream-pinned-v0"    # open engine behind an OpenAI API (vLLM, SGLang, TGI): same-deployment replay
+UPSTREAM_WITNESS_PROFILE = "openai-upstream-witness-v0"  # closed model behind an API: record only, no re-execution possible
 GGUF_FTYPE_BPOSIT8 = 42          # LLAMA_FTYPE_MOSTLY_BPOSIT8 in llama-cpp-et
 DEFAULT_OLLAMA_HOST = "http://127.0.0.1:11434"
 
@@ -123,20 +125,33 @@ def llamacpp_device_desc(binary: str, device: str) -> str:
             return desc
     raise RuntimeError(f"llama.cpp device {device!r} not listed by {binary} --list-devices")
 
+RAW_TEMPLATE = "{{ messages[0]['content'] }}"   # identity chat template: feed the prompt verbatim
+
+
 def run_llamacpp(binary: str, model: str, prompt: str,
                  n_predict: int = 128, seed: int = 1, threads: int = 4,
                  logits_out: str | None = None, logits_layers: bool = False,
                  logits_matmuls: bool = False, device: str | None = None,
                  n_gpu_layers: int | None = None, flash_attn: str | None = None,
-                 warmup: str | None = None) -> str:
+                 warmup: str | None = None, raw: bool = False) -> str:
     """Deterministically-pinned llama.cpp run; returns ONLY the generated text.
+
+    raw=True: the prompt is a fully rendered chat transcript (special tokens included, e.g.
+    ChatML with a tools block). Single-turn mode always renders -p through a chat template as
+    the user turn, so raw mode substitutes the IDENTITY template ({{ messages[0]['content'] }}):
+    the transcript is tokenised verbatim (special tokens parsed). Certified as params.chat="raw";
+    the verifier re-tokenises raw for that mode (tokenizer.prompt_ids(chat="raw")).
 
     Uses single-turn simple-io mode (-st --simple-io) — this llama.cpp line ships
     an interactive chat UI that blocks on stdin without -st. The UI echoes the
     prompt as a "> ..." line and appends a "[ Prompt: ... t/s ]" stats line whose
     numbers vary run-to-run, so the receipt digests the EXTRACTED generation only.
     """
-    cmd = [binary, "-m", model, "-p", prompt, "-n", str(n_predict),
+    # --no-escape: llama-cli otherwise rewrites \n, \t, \", \\ ... INSIDE the prompt before
+    # tokenising it (a prompt quoting "abc\ndef" would run on a different string than the one the
+    # receipt hashes, and its echo would not match). The reference re-executors tokenise the raw
+    # prompt, so the runtime must too.
+    cmd = [binary, "-m", model, "-p", prompt, "--no-escape", "-n", str(n_predict),
            "--temp", "0", "--seed", str(seed), "-t", str(threads),
            "-st", "--simple-io"]
     if device is not None:
@@ -147,6 +162,8 @@ def run_llamacpp(binary: str, model: str, prompt: str,
         cmd += ["-fa", flash_attn]           # certified in params; "off" = exact KQ/softmax/KQV path
     if warmup == "off":
         cmd += ["--no-warmup"]               # certified in params; no warm-up evaluation in the dump
+    if raw:
+        cmd += ["--jinja", "--chat-template", RAW_TEMPLATE]
     env = dict(os.environ)
     env.pop("INVAR_LOGITS_OUT", None)
     if logits_out:
@@ -160,7 +177,13 @@ def run_llamacpp(binary: str, model: str, prompt: str,
     if out.returncode != 0:
         raise RuntimeError(f"llama.cpp failed: {out.stderr[-400:]}")
     text = out.stdout
-    echo = "\n> " + prompt + "\n"
+    # The chat UI echoes the user turn as "\n> <prompt>\n"; prompts longer than 500 BYTES are
+    # echoed as their first 500 bytes followed by " ... (truncated)\n" (tools/cli/cli-ui.h).
+    raw = prompt.encode("utf-8")
+    if len(raw) > 500:
+        echo = "\n> " + raw[:500].decode("utf-8", "ignore") + " ... (truncated)\n"
+    else:
+        echo = "\n> " + prompt + "\n"
     start = text.rfind(echo)
     if start < 0:
         raise RuntimeError("could not locate prompt echo in llama.cpp output")
@@ -213,9 +236,12 @@ class LlamaCppBackend:
             d["n_gpu_layers"] = self.n_gpu_layers
         return d
 
-    def params(self, n_predict: int, seed: int) -> dict:
-        return {"n_predict": n_predict, "seed": seed,
-                "threads": self.threads, "temp": 0, "flash_attn": "off", "warmup": "off"}
+    def params(self, n_predict: int, seed: int, chat: str | None = None) -> dict:
+        p = {"n_predict": n_predict, "seed": seed,
+             "threads": self.threads, "temp": 0, "flash_attn": "off", "warmup": "off"}
+        if chat:
+            p["chat"] = chat                   # "raw": prompt is a rendered transcript, no template
+        return p
 
     def generate(self, prompt: str, params: dict) -> str:
         self.last_dump = None
@@ -232,7 +258,8 @@ class LlamaCppBackend:
                             logits_layers=self.dump_units,     # l_out rows: residual/norm re-execution
                             logits_matmuls=self.dump_units, device=self.device,
                             n_gpu_layers=self.n_gpu_layers,
-                            flash_attn=params.get("flash_attn"), warmup=params.get("warmup"))
+                            flash_attn=params.get("flash_attn"), warmup=params.get("warmup"),
+                            raw=(params.get("chat") == "raw"))
         if dump and os.path.exists(dump):
             self.last_dump = dump
         return text
@@ -379,6 +406,145 @@ class OllamaBackend:
         return r["response"]
 
 
+# --------------------------------------------------------------------------- OpenAI-compatible upstream
+
+class UpstreamError(RuntimeError):
+    pass
+
+
+def _http_json(url: str, body: dict | None = None, headers: dict | None = None,
+               timeout: float = 300) -> dict:
+    data = json.dumps(body).encode() if body is not None else None
+    req = urllib.request.Request(url, data=data, method="POST" if data else "GET",
+                                 headers={"Content-Type": "application/json", **(headers or {})})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return json.loads(r.read().decode())
+    except urllib.error.HTTPError as e:
+        raise UpstreamError(f"{url}: HTTP {e.code}: {e.read()[:200]!r}") from e
+    except urllib.error.URLError as e:
+        raise UpstreamError(f"{url}: {e.reason}") from e
+
+
+def weights_dir_digest(path: str) -> str:
+    """One digest over an HF-style weights directory: every *.safetensors / *.bin /
+    config / tokenizer file, sorted by relative path, name and content both hashed."""
+    h = hashlib.sha256()
+    names = []
+    for root, _dirs, files in os.walk(path):
+        for f in files:
+            if f.endswith((".safetensors", ".bin", ".gguf", ".json", ".txt", ".model")):
+                names.append(os.path.relpath(os.path.join(root, f), path))
+    for rel in sorted(names):
+        h.update(rel.encode() + b"\0")
+        h.update(bytes.fromhex(file_digest(os.path.join(path, rel)).removeprefix("sha256:")))
+    return "sha256:" + h.hexdigest()
+
+
+class OpenAIUpstreamBackend:
+    """INVAR in front of any OpenAI-compatible endpoint.
+
+    Two profiles, chosen honestly by what the upstream is:
+      pinned  — an OPEN engine you operate (vLLM, SGLang, TGI, LM Studio ...). The receipt
+                pins the engine version (and image digest if you pass it), the served model id,
+                and the weights digest when --weights-dir points at the checkpoint. Verification
+                = same-deployment replay at temperature 0 with the same seed: the output digest
+                must match. No cross-hardware bit-identity is claimed (float kernels).
+      witness — a CLOSED model behind a provider API. Nobody can re-execute closed weights, so
+                the receipt is a provenance RECORD: what was asked, what came back, which model
+                id, provider host and response fingerprint, signed and chained. `invar verify`
+                checks structure, chain and signature only and says so; an optional consistency
+                probe (re-query, record agreement) is a separate, clearly-labelled measurement.
+    """
+    name = "openai"
+
+    def __init__(self, model: str, base_url: str, api_key: str | None = None,
+                 witness: bool = False, weights_dir: str | None = None,
+                 image_digest: str | None = None, timeout: float = 300):
+        self.model = model
+        if not re.match(r"^https?://[^/\s]+", base_url or ""):
+            raise UpstreamError(f"upstream URL must be http(s)://host[:port][/path], got {base_url!r}")
+        self.base_url = base_url.rstrip("/")
+        if not self.base_url.endswith("/v1"):
+            self.base_url += "/v1"
+        self.api_key = api_key or os.environ.get("INVAR_UPSTREAM_API_KEY") or os.environ.get("OPENAI_API_KEY")
+        self.witness = witness
+        self.profile = UPSTREAM_WITNESS_PROFILE if witness else UPSTREAM_PINNED_PROFILE
+        self.weights_dir = weights_dir or os.environ.get("INVAR_UPSTREAM_WEIGHTS")
+        self.image_digest = image_digest or os.environ.get("INVAR_UPSTREAM_IMAGE_DIGEST")
+        self.timeout = timeout
+        self.last_response_meta: dict = {}
+
+    @property
+    def model_name(self) -> str:
+        return self.model
+
+    def _headers(self) -> dict:
+        return {"Authorization": f"Bearer {self.api_key}"} if self.api_key else {}
+
+    def _engine_version(self) -> tuple[str, str]:
+        """(engine, version) from the endpoints open engines expose; 'unknown' otherwise."""
+        root = self.base_url[: -len("/v1")]
+        for path, key, engine in (("/version", "version", "vllm"),
+                                  ("/get_server_info", "version", "sglang"),
+                                  ("/info", "version", "tgi")):
+            try:
+                d = _http_json(root + path, headers=self._headers(), timeout=10)
+                v = d.get(key) or d.get("sglang_version") or d.get("vllm_version")
+                if v:
+                    return engine, str(v)
+            except UpstreamError:
+                continue
+        return "unknown", "unknown"
+
+    # -- deployment identity -------------------------------------------------
+    def deployment(self) -> dict:
+        models = _http_json(self.base_url + "/models", headers=self._headers(), timeout=30)
+        ids = [m.get("id") for m in models.get("data", [])]
+        if self.model not in ids:
+            raise UpstreamError(f"model {self.model!r} not served at {self.base_url} (have {ids[:8]})")
+        engine, version = self._engine_version()
+        host = re.sub(r"^https?://", "", self.base_url).split("/")[0]
+        d = {"model_name": self.model, "provider_host": host,
+             "engine": engine, "runtime_version": version}
+        if self.image_digest:
+            d["runtime_digest"] = self.image_digest
+            d["runtime_pinned_by"] = "image"
+        else:
+            d["runtime_digest"] = f"{engine}-version:{version}"
+            d["runtime_pinned_by"] = "version" if version != "unknown" else "none"
+        if self.witness:
+            # identity of the *named* model at this provider; not a weights digest
+            d["model_digest"] = "sha256:" + hashlib.sha256(f"{host}|{self.model}".encode()).hexdigest()
+            d["model_digest_kind"] = "identifier"
+            d["reexecutable"] = False
+        else:
+            if self.weights_dir and os.path.isdir(self.weights_dir):
+                d["weights_digest"] = weights_dir_digest(self.weights_dir)
+                d["model_digest"] = d["weights_digest"]
+                d["model_digest_kind"] = "weights-dir"
+            else:
+                d["model_digest"] = "sha256:" + hashlib.sha256(f"{host}|{self.model}|{version}".encode()).hexdigest()
+                d["model_digest_kind"] = "identifier"     # weaker; stated in the receipt
+            d["reexecutable"] = True
+        return d
+
+    def params(self, n_predict: int, seed: int) -> dict:
+        return {"n_predict": n_predict, "seed": seed, "temp": 0, "top_p": 1}
+
+    def generate(self, prompt: str, params: dict) -> str:
+        body = {"model": self.model, "messages": [{"role": "user", "content": prompt}],
+                "temperature": 0, "top_p": 1, "max_tokens": params["n_predict"],
+                "seed": params["seed"], "stream": False}
+        r = _http_json(self.base_url + "/chat/completions", body, self._headers(), self.timeout)
+        try:
+            text = r["choices"][0]["message"]["content"] or ""
+        except (KeyError, IndexError, TypeError):
+            raise UpstreamError(f"upstream returned no completion: {json.dumps(r)[:200]}")
+        self.last_response_meta = {k: r.get(k) for k in ("id", "model", "system_fingerprint", "created") if r.get(k) is not None}
+        return text
+
+
 # --------------------------------------------------------------------------- helpers
 
 def looks_like_ollama_tag(model: str) -> bool:
@@ -390,9 +556,20 @@ def looks_like_ollama_tag(model: str) -> bool:
 def make_backend(kind: str, model: str, *, binary: str | None = None,
                  host: str | None = None, threads: int = 4,
                  num_ctx: int = 2048, num_gpu: int | None = None,
-                 device: str | None = None, n_gpu_layers: int | None = None):
+                 device: str | None = None, n_gpu_layers: int | None = None,
+                 upstream_url: str | None = None, weights_dir: str | None = None,
+                 image_digest: str | None = None):
     if kind == "auto":
-        kind = "ollama" if looks_like_ollama_tag(model) else "llamacpp"
+        if upstream_url:
+            kind = "openai"
+        else:
+            kind = "ollama" if looks_like_ollama_tag(model) else "llamacpp"
+    if kind in ("openai", "witness"):
+        url = upstream_url or os.environ.get("INVAR_UPSTREAM_URL")
+        if not url:
+            raise ValueError("--upstream-url (or INVAR_UPSTREAM_URL) is required for the openai/witness backend")
+        return OpenAIUpstreamBackend(model, url, witness=(kind == "witness"),
+                                     weights_dir=weights_dir, image_digest=image_digest)
     if kind == "ollama":
         return OllamaBackend(model, host=host, num_ctx=num_ctx,
                              num_gpu=num_gpu, binary=binary)
@@ -406,4 +583,5 @@ def make_backend(kind: str, model: str, *, binary: str | None = None,
 
 def backend_for_profile(profile: str):
     return {LLAMACPP_PROFILE: "llamacpp", LLAMACPP_EXACT_PROFILE: "llamacpp",
-            OLLAMA_PROFILE: "ollama"}.get(profile)
+            OLLAMA_PROFILE: "ollama", UPSTREAM_PINNED_PROFILE: "openai",
+            UPSTREAM_WITNESS_PROFILE: "witness"}.get(profile)
