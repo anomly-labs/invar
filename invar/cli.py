@@ -518,10 +518,18 @@ def main():
         results = new_results
 
     bad = 0
+    indet = 0
     for i, ok, why in results:
-        print(f"entry {i}: {'ACCEPT' if ok else 'REJECT'} — {why}")
-        bad += (not ok)
-    print(f"{'ALL ACCEPT' if bad == 0 else f'{bad} REJECTED'} "
+        label = "ACCEPT" if ok else ("INDETERMINATE" if ok is None else "REJECT")
+        print(f"entry {i}: {label} — {why}")
+        bad += (ok is False)
+        indet += (ok is None)
+    if indet:
+        print(f"{indet} INDETERMINATE: the upstream returned different answers to the same greedy request, so "
+              "same-deployment replay cannot confirm or refute these entries. Their receipts are intact "
+              "(certificate, chain, signatures) and count as witness-grade provenance. For re-executable "
+              "receipts serve the model on the exact tier (deterministic profile).", file=sys.stderr)
+    print(f"{'ALL ACCEPT' if bad == 0 and indet == 0 else (f'{bad} REJECTED' if bad else f'{indet} INDETERMINATE, 0 rejected')} "
           f"({len(results)} entries)")
 
     if a.verdict_out:
@@ -545,7 +553,7 @@ def main():
         manifest = {"cr": "0.1", "kind": "invar-verify-verdict",
                     "worldline": {"digest": digest_file(a.worldline), "entries": len(results)},
                     "checks": checks,
-                    "verdicts": [{"index": i, "accept": bool(ok), "why": why} for i, ok, why in results],
+                    "verdicts": [{"index": i, "accept": ok is True, "indeterminate": ok is None, "why": why} for i, ok, why in results],
                     "summary": {"accepted": len(results) - bad, "rejected": bad},
                     "unix_time": int(_time.time())}
         entry = {"manifest": manifest, "certificate": certificate_of(manifest)}
@@ -556,7 +564,7 @@ def main():
             f.write(signer.pubkey_pem)
         print(f"verdict statement -> {a.verdict_out} (COSE_Sign1, {signer.backend}, key {signer.key_id[:23]}…; "
               f"certificate {entry['certificate'][:23]}…; verifier pubkey beside it)")
-    sys.exit(0 if bad == 0 else 1)
+    sys.exit(1 if bad else (2 if indet else 0))
 
 
 if __name__ == "__main__":

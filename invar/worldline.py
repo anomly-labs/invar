@@ -27,7 +27,7 @@ import os
 import threading
 import time
 
-from .backends import (LLAMACPP_PROFILE, LLAMACPP_EXACT_PROFILE, LlamaCppBackend, file_digest,  # noqa: F401
+from .backends import (LLAMACPP_PROFILE, LLAMACPP_EXACT_PROFILE, UPSTREAM_PINNED_PROFILE, LlamaCppBackend, file_digest,  # noqa: F401
                        run_llamacpp)
 from .attest import NONE as ATTEST_NONE, AttestationBinding, check_binding  # noqa: F401
 from .hwsign import verify_signature
@@ -166,6 +166,9 @@ def verify_entries(path: str, prompts: dict[str, str], backends: dict,
                    cross_deployment: bool = False) -> list:
     """Verify every entry: certificate matches its canonical manifest, the chain
     links, and (if reexecute) the pinned computation reproduces the output digest.
+    Each result is (index, ok, why) with ok True (ACCEPT), False (REJECT) or None
+    (INDETERMINATE: receipt intact, but the deployment could not reproduce its own
+    output on two fresh replays, so re-execution proves nothing either way).
     `prompts` maps prompt digest -> prompt text for re-execution.
     `backends` maps profile -> backend instance, or -> factory(model_name) that
     builds one per model named in the receipts (a worldline may mix profiles and
@@ -179,6 +182,23 @@ def verify_entries(path: str, prompts: dict[str, str], backends: dict,
     prev = binding.genesis() if binding else Worldline.GENESIS
     live: dict[str, dict] = {}       # (profile, model) -> deployment(), once
     inst: dict[tuple, object] = {}   # factory results, keyed the same way
+    # The log can testify against its own deployment: two entries with the same request
+    # (profile, model, prompt digest, params) and different certified outputs mean the
+    # deployment is not reproducible, whatever a replay says today. Index that first.
+    flaky: dict[tuple, list] = {}
+    seen_req: dict[tuple, tuple] = {}
+    try:
+        with open(path) as f0:
+            for i0, line0 in enumerate(f0):
+                e0 = json.loads(line0); m0 = e0.get("manifest") or {}; c0 = m0.get("computation") or {}
+                k = (m0.get("profile"), c0.get("model_name"), (m0.get("inputs") or {}).get("prompt"),
+                     json.dumps(c0.get("params"), sort_keys=True))
+                out0 = (m0.get("outputs") or {}).get("text")
+                if k in seen_req and seen_req[k][1] != out0:
+                    flaky.setdefault((k[0], k[1]), []).append((seen_req[k][0], i0))
+                seen_req.setdefault(k, (i0, out0))
+    except (OSError, ValueError):
+        pass
 
     def _backend(profile: str, comp: dict):
         be = backends.get(profile)
@@ -230,8 +250,32 @@ def verify_entries(path: str, prompts: dict[str, str], backends: dict,
                     else:
                         out = be.generate(prompts[pd], comp["params"])
                         if digest_bytes(out.encode()) != m["outputs"]["text"]:
-                            ok, why = False, ("re-execution output digest differs"
-                                              + (f" (cross-deployment: {', '.join(diff)} differ)" if crossing else ""))
+                            # Before calling it tampering, ask the deployment once more. A float
+                            # upstream (vLLM, SGLang, TGI) that gives two different answers to the
+                            # same greedy request cannot re-execute anything: the receipt is intact,
+                            # the computation is simply not reproducible there. That is a third
+                            # verdict, not a rejection, and it must not read like tampering.
+                            upstream = m.get("profile") == UPSTREAM_PINNED_PROFILE
+                            replays = {digest_bytes(out.encode())}
+                            if upstream:
+                                for _ in range(2):
+                                    replays.add(digest_bytes(be.generate(prompts[pd], comp["params"]).encode()))
+                            pairs = flaky.get((m.get("profile"), comp.get("model_name")), []) if upstream else []
+                            if len(replays) > 1:
+                                ok, why = None, ("INDETERMINATE: the upstream did not reproduce its own output "
+                                                 f"({len(replays)} different answers in 3 fresh greedy replays); certificate and "
+                                                 "chain intact; this deployment cannot re-execute the entry -- witness-grade "
+                                                 "provenance, or use the exact tier")
+                            elif pairs:
+                                ok, why = None, ("INDETERMINATE: fresh replays agree with each other but not with the certificate, "
+                                                 "and this log already shows the deployment answering identical requests differently "
+                                                 f"(entries {', '.join(f'{a}/{b}' for a, b in pairs[:3])}); a non-reproducible deployment "
+                                                 "cannot confirm or refute this entry -- witness-grade provenance, or use the exact tier")
+                            else:
+                                ok, why = False, ("re-execution output digest differs"
+                                                  + (" (three fresh replays agree with each other, not with the certificate, and "
+                                                     "this log shows no identical request answered differently)" if upstream else "")
+                                                  + (f" (cross-deployment: {', '.join(diff)} differ)" if crossing else ""))
                         elif crossing:
                             why = ("re-executed CROSS-DEPLOYMENT, output digest matches "
                                    f"(certified {', '.join(diff)} differ from this verifier's)")

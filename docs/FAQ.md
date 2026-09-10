@@ -50,3 +50,12 @@ log) go to the server you run, with your token, over your TLS.
 
 **License lost?** Email us from the purchase address; we re-issue. Licenses are
 files, not activations — no server outage can brick your install.
+
+## What does INDETERMINATE mean?
+
+The receipt is intact — certificate, chain and any signatures check — but the deployment it names
+could not reproduce its own output (three fresh replays disagree, or the log itself shows the
+same request certified with different outputs), so replaying it proves nothing either way. It is
+not tampering; it is a float server being a float server. Treat the entry as a signed provenance
+record. If you need re-executable receipts, serve the model on the exact tier. `invar verify`
+exits 2 when a log has indeterminate entries and no rejections.

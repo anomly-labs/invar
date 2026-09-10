@@ -32,6 +32,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import sys
 import re
 import shutil
 import subprocess
@@ -527,7 +528,33 @@ class OpenAIUpstreamBackend:
                 d["model_digest"] = "sha256:" + hashlib.sha256(f"{host}|{self.model}|{version}".encode()).hexdigest()
                 d["model_digest_kind"] = "identifier"     # weaker; stated in the receipt
             d["reexecutable"] = True
+            d["upstream_self_test"] = self.self_test()
         return d
+
+    def self_test(self) -> str:
+        """Two identical greedy requests: 'reproducible' if the texts match, else 'nondeterministic'.
+        Recorded in every receipt's computation so a reader knows, before verifying, whether
+        same-deployment replay can mean anything. Cached per backend instance."""
+        if getattr(self, "_self_test", None) is None:
+            if self.witness:
+                self._self_test = "not-run"
+            else:
+                probe = "Reproducibility probe: name three prime numbers and stop."
+                other = "Reproducibility probe: write one sentence about tides."
+                try:
+                    a = self.generate(probe, {"n_predict": 16, "seed": 7})
+                    self.generate(other, {"n_predict": 24, "seed": 7})     # perturb server state between probes
+                    b = self.generate(probe, {"n_predict": 16, "seed": 7})
+                    self.generate(other, {"n_predict": 8, "seed": 7})
+                    c = self.generate(probe, {"n_predict": 16, "seed": 7})
+                    self._self_test = "reproducible-3-probes" if a == b == c else "nondeterministic"
+                except Exception:
+                    self._self_test = "not-run"
+                if self._self_test == "nondeterministic":
+                    print("upstream self-test: NONDETERMINISTIC (two identical greedy requests differed): "
+                          "receipts will be witness-grade for replay; use the exact tier for re-executable ones",
+                          file=sys.stderr)
+        return self._self_test
 
     def params(self, n_predict: int, seed: int) -> dict:
         return {"n_predict": n_predict, "seed": seed, "temp": 0, "top_p": 1}

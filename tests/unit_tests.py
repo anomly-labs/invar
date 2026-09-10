@@ -1423,6 +1423,62 @@ def sec_hwsign_attest(tmp, art):
     e4 = {"manifest": e["manifest"]}
     check("text copies: entries without readable copies are unaffected", TCM(e4) == "")
 
+    # -- INDETERMINATE: an upstream that cannot reproduce itself must not read as tampering
+    #    (pilot dry-run 2026-09-09: 2 of 3 genuine vLLM receipts came back REJECT)
+    import threading as _th
+    from http.server import BaseHTTPRequestHandler as _BH
+    from invar.backends import OpenAIUpstreamBackend as _OUB
+    from invar.worldline import build_entry_for as _BEF, verify_entries as _VE, Worldline as _WL
+    calls = {"n": 0}
+    class _Stub(_BH):
+        def log_message(self, *a): pass
+        def _send(self, obj):
+            b = json.dumps(obj).encode(); self.send_response(200); self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(b))); self.end_headers(); self.wfile.write(b)
+        def do_GET(self):
+            if self.path.endswith("/models"): self._send({"data": [{"id": "stub-model"}]})
+            elif self.path.endswith("/version"): self._send({"version": "0.0-stub"})
+            else: self.send_response(404); self.end_headers()
+        def do_POST(self):
+            n = int(self.headers.get("Content-Length", 0)); body = json.loads(self.rfile.read(n) or b"{}")
+            prompt = body["messages"][0]["content"]; calls["n"] += 1
+            if prompt.startswith("FLAKY"):
+                text = "answer A" if calls["n"] % 2 else "answer B"     # alternates every call
+            else:
+                text = "stable answer"
+            self._send({"id": "x", "model": "stub-model", "choices": [{"message": {"content": text}}]})
+    _srv = ThreadingHTTPServer(("127.0.0.1", 0), _Stub); _th.Thread(target=_srv.serve_forever, daemon=True).start()
+    _url = f"http://127.0.0.1:{_srv.server_address[1]}/v1"
+    try:
+        be = _OUB("stub-model", _url)
+        dep = be.deployment()
+        check("upstream self-test recorded in the deployment (stub is stable on the probe)",
+              dep.get("upstream_self_test") == "reproducible-3-probes", str(dep.get("upstream_self_test")))
+        prev = _WL.GENESIS; entries = []
+        for prompt, out in (("stable prompt", "stable answer"), ("FLAKY prompt", "answer Z"), ("stable prompt 2", "WRONG answer")):
+            e = _BEF(be, prompt, out, be.params(16, 1), prev, deployment=dep); e["prompt_text"] = prompt; e["output_text"] = out
+            entries.append(e); prev = e["chain"]
+        wlp3 = os.path.join(tmp, "upstream_indet.jsonl"); open(wlp3, "w").write("".join(json.dumps(e) + "\n" for e in entries))
+        prompts = {e["manifest"]["inputs"]["prompt"]: e["prompt_text"] for e in entries}
+        res = _VE(wlp3, prompts, {be.profile: be}, reexecute=True)
+        check("upstream replay: stable entry ACCEPTs", res[0][1] is True, res[0][2])
+        check("upstream replay: entry the upstream cannot reproduce is INDETERMINATE, not REJECT",
+              res[1][1] is None and "INDETERMINATE" in res[1][2], res[1][2])
+        check("upstream replay: wrong digest with a self-consistent upstream is still REJECT",
+              res[2][1] is False and "three fresh replays agree" in res[2][2], res[2][2])
+        # the log testifies: identical request certified with two different outputs -> deployment
+        # demonstrably non-reproducible -> a differing replay is INDETERMINATE, citing the entries
+        prev = _WL.GENESIS; ents = []
+        for out in ("stable answer", "stable answer", "a different answer"):
+            e = _BEF(be, "stable prompt", out, be.params(16, 1), prev, deployment=dep); e["prompt_text"] = "stable prompt"; e["output_text"] = out
+            ents.append(e); prev = e["chain"]
+        wlp4 = os.path.join(tmp, "upstream_flaky_log.jsonl"); open(wlp4, "w").write("".join(json.dumps(e) + "\n" for e in ents))
+        res4 = _VE(wlp4, {ents[0]["manifest"]["inputs"]["prompt"]: "stable prompt"}, {be.profile: be}, reexecute=True)
+        check("upstream replay: log with identical requests answered differently makes the odd entry INDETERMINATE (cites entries)",
+              res4[0][1] is True and res4[2][1] is None and "entries 0/2" in res4[2][2], res4[2][2])
+    finally:
+        _srv.shutdown()
+
     # -- spot-check (CSC): codec vs the C golden LUT, stdlib GGUF reader, exact re-execution
     from invar import spotcheck as SC
     golden_h = os.path.expanduser("~/development/llama-cpp-et/tests/bposit8-quire-ref/bp8_dot_golden.h")

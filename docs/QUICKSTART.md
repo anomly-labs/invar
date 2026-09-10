@@ -51,6 +51,17 @@ invar verify worldline.jsonl --binary llama-cli --model ~/.invar/models/<your-mo
 re-run and produced the same output, bit for bit. Edit any byte of the log and
 verification REJECTS. That's the product.
 
+
+## One command for all of the above
+```
+tools/pilot_check.sh --upstream http://your-server:8000 --model NAME     # in front of a server you run
+tools/pilot_check.sh --gguf model.gguf                                    # exact tier, INVAR serves it
+```
+Runs the determinism triage on your server, starts `invar serve`, mints one receipt, verifies it
+by re-execution, tampers a copy (must REJECT), and leaves everything in `pilot-check-<ts>/` with a
+six-line summary. Measured on 2026-09-09: attested tier in front of a stock vLLM, first receipted
+answer in 1 s; exact tier on a CPU, 5 s.
+
 ## 5. (Teams) point agents at your Ledger
 ```
 # on the Ledger host (requires an INVAR Ledger license):
