@@ -8,9 +8,9 @@ package crverify
 
 import (
 	"bufio"
-	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"sort"
 	"strconv"
 	"strings"
@@ -18,9 +18,12 @@ import (
 
 // UnitEval is one evaluation with per-layer named rows (first occurrence wins).
 type UnitEval struct {
-	Hidden []float32
-	Logits []float32
-	Layers map[int]map[string][]float32
+	Hidden    []float32
+	Logits    []float32
+	Layers    map[int]map[string][]float32
+	Pos       map[int]map[string]int // RoPE position per layer per tensor base name
+	InpEmbd   []float32              // layer-0 residual input (token embedding row)
+	InpScaled []float32              // gemma: embedding * sqrt(n_embd)
 }
 
 // Unit describes one matmul: input tensor name(s), output tensor name, weight template.
@@ -46,18 +49,25 @@ func ReadDumpUnits(r io.Reader) ([]UnitEval, error) {
 	sc := bufio.NewScanner(r)
 	sc.Buffer(make([]byte, 1<<20), 256<<20)
 	var out []UnitEval
-	cur := UnitEval{Layers: map[int]map[string][]float32{}}
+	cur := UnitEval{Layers: map[int]map[string][]float32{}, Pos: map[int]map[string]int{}}
 	for sc.Scan() {
 		if len(sc.Bytes()) == 0 {
 			continue
 		}
-		var d dumpLine
-		if err := json.Unmarshal(sc.Bytes(), &d); err != nil {
-			return nil, err
+		name, v, pos, hasPos, ok := parseDumpLine(sc.Bytes())
+		if !ok {
+			var err error
+			name, v, pos, hasPos, err = slowDumpLine(sc.Bytes())
+			if err != nil {
+				return nil, err
+			}
 		}
-		v, err := floats(d.Hex)
-		if err != nil {
-			return nil, err
+		if v == nil { // inp_tokens and other payload-free lines
+			continue
+		}
+		d := dumpLine{Tensor: name}
+		if hasPos {
+			d.Pos = &pos
 		}
 		switch {
 		case d.Tensor == "result_norm":
@@ -65,7 +75,11 @@ func ReadDumpUnits(r io.Reader) ([]UnitEval, error) {
 		case d.Tensor == "result_output":
 			cur.Logits = v
 			out = append(out, cur)
-			cur = UnitEval{Layers: map[int]map[string][]float32{}}
+			cur = UnitEval{Layers: map[int]map[string][]float32{}, Pos: map[int]map[string]int{}}
+		case d.Tensor == "inp_embd" || d.Tensor == "embd":
+			cur.InpEmbd = v
+		case d.Tensor == "inp_scaled":
+			cur.InpScaled = v
 		default:
 			i := strings.LastIndexByte(d.Tensor, '-')
 			if i <= 0 {
@@ -83,6 +97,14 @@ func ReadDumpUnits(r io.Reader) ([]UnitEval, error) {
 			}
 			if _, seen := lay[base]; !seen {
 				lay[base] = v
+				if d.Pos != nil {
+					pl, ok2 := cur.Pos[il]
+					if !ok2 {
+						pl = map[string]int{}
+						cur.Pos[il] = pl
+					}
+					pl[base] = *d.Pos
+				}
 			}
 		}
 	}
@@ -105,11 +127,13 @@ func VerifyUnits(g *GGUF, evals []UnitEval, nonce []byte, rows int) (SpotResult,
 		sort.Ints(ils)
 		for _, il := range ils {
 			lay := ev.Layers[il]
+			xqCache := map[string][]Block{} // K/Q/V share one input, gate/up another: quantise once
 			for _, u := range AllUnits {
 				var inp []float32
+				var inpName string
 				for _, n := range u.Inputs {
 					if v, ok := lay[n]; ok {
-						inp = v
+						inp, inpName = v, n
 						break
 					}
 				}
@@ -125,18 +149,27 @@ func VerifyUnits(g *GGUF, evals []UnitEval, nonce []byte, rows int) (SpotResult,
 				if len(inp) != nIn || len(out) != nOut {
 					return SpotResult{Why: fmt.Sprintf("eval %d layer %d %s: shape mismatch", ei, il, u.Output), Checked: res.Checked}, per
 				}
-				xq, err := QuantizeRow(inp)
-				if err != nil {
-					return SpotResult{Why: err.Error()}, per
+				xq, ok := xqCache[inpName]
+				if !ok {
+					var err error
+					if xq, err = QuantizeRow(inp); err != nil {
+						return SpotResult{Why: err.Error()}, per
+					}
+					xqCache[inpName] = xq
 				}
 				n2 := append(append([]byte{}, nonce...), byte(ei&0xFF), byte(il&0xFF))
 				n2 = append(n2, []byte(u.Output)...)
-				for _, r := range SampledRows(n2, nOut, rows) {
-					wb, err := g.Row(t, r)
-					if err != nil {
+				var err error
+				sampled := SampledRows(n2, nOut, rows)
+				wbs := make([][]Block, len(sampled))
+				for i, r := range sampled {
+					if wbs[i], err = g.Row(t, r); err != nil {
 						return SpotResult{Why: err.Error()}, per
 					}
-					got := mathFloat32bitsOf(float32(ExactDot(xq, wb)))
+				}
+				vals := ExactDotRows(xq, wbs)
+				for i, r := range sampled {
+					got := mathFloat32bitsOf(float32(vals[i]))
 					want := mathFloat32bitsOf(out[r])
 					res.Checked++
 					per[u.Output]++
@@ -169,4 +202,53 @@ func VerifyUnits(g *GGUF, evals []UnitEval, nonce []byte, rows int) (SpotResult,
 	}
 	res.Why = fmt.Sprintf("%d challenged matmul rows re-executed bit-exactly (%s) over %d evaluations", res.Checked, strings.Join(parts, ", "), len(evals))
 	return res, per
+}
+
+// UnitCoverage reports how much of the weight space a given challenge budget actually samples.
+// A spot-check catches a substituted output row only if that row is challenged, so the budget is a
+// security parameter, not a performance knob. For each captured unit this computes the probability
+// that a single substituted row would be caught, 1-(1-rows/nOut)^evals, and returns the weakest
+// one — the largest tensor, which is where an adversary would hide. Shapes only; nothing is verified.
+func UnitCoverage(g *GGUF, evals []UnitEval, rows int) (worstUnit string, worstP float64, nOut int) {
+	worstP = 2
+	seen := map[string]int{}
+	for _, ev := range evals {
+		for il, lay := range ev.Layers {
+			for _, u := range AllUnits {
+				if _, ok := lay[u.Output]; !ok {
+					continue
+				}
+				t, ok := g.Tensors[fmt.Sprintf(u.Weight, il)]
+				if !ok || len(t.Dims) < 2 {
+					continue
+				}
+				if n := int(t.Dims[1]); n > seen[u.Output] {
+					seen[u.Output] = n
+				}
+			}
+		}
+	}
+	names := make([]string, 0, len(seen))
+	for name := range seen {
+		names = append(names, name)
+	}
+	sort.Strings(names) // deterministic tie-break: two units of equal width must not depend on map order
+	for _, name := range names {
+		n := seen[name]
+		if n <= 0 {
+			continue
+		}
+		r := float64(rows) / float64(n)
+		if r > 1 {
+			r = 1
+		}
+		p := 1 - math.Pow(1-r, float64(len(evals)))
+		if p < worstP {
+			worstP, worstUnit, nOut = p, name, n
+		}
+	}
+	if worstUnit == "" {
+		return "", 0, 0
+	}
+	return worstUnit, worstP, nOut
 }

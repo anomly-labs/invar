@@ -16,7 +16,11 @@ import (
 // Conformance with the C ggml-det library via the Python port's expected bit patterns
 // (tests/test_detmath.py checks Python against C; testdata/detmath-cases.txt is produced by it).
 func TestDetmathConformance(t *testing.T) {
-	f, err := os.Open("testdata/detmath-cases.txt")
+	path := os.Getenv("INVAR_DETMATH_CASES") // regenerate with tests/test_detmath.py INVAR_DETMATH_EMIT_GO=...
+	if path == "" {
+		path = "testdata/detmath-cases.txt"
+	}
+	f, err := os.Open(path)
 	if err != nil {
 		t.Skip("no detmath cases")
 	}

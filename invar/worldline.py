@@ -146,6 +146,19 @@ class Worldline:
                           n_predict, seed)
 
 
+def text_copies_mismatch(e: dict) -> str:
+    """The certificate covers digests; `prompt_text` / `output_text` are readable copies
+    written beside them. A copy that does not hash to its certified digest is a lie a
+    reader would believe (the certificate still verifies), so it is a REJECT reason, not a
+    warning. Returns the reason or ""."""
+    m = e.get("manifest") or {}
+    if "output_text" in e and digest_bytes(str(e["output_text"]).encode()) != (m.get("outputs") or {}).get("text"):
+        return "output_text does not match the certified output digest"
+    if "prompt_text" in e and digest_bytes(str(e["prompt_text"]).encode()) != (m.get("inputs") or {}).get("prompt"):
+        return "prompt_text does not match the certified prompt digest"
+    return ""
+
+
 def verify_entries(path: str, prompts: dict[str, str], backends: dict,
                    reexecute: bool = True, binding=None,
                    trusted_key_ids: set[str] | None = None,
@@ -181,6 +194,8 @@ def verify_entries(path: str, prompts: dict[str, str], backends: dict,
             m, ok, why = e["manifest"], True, "ok"
             if certificate_of(m) != e["certificate"]:
                 ok, why = False, "certificate mismatch"
+            elif (bad := text_copies_mismatch(e)):
+                ok, why = False, bad
             elif m["prev_chain"] != prev:
                 ok, why = False, "chain broken"
             elif e["chain"] != "sha256:" + hashlib.sha256(

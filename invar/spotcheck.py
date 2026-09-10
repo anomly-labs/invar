@@ -156,8 +156,38 @@ def scale_exp_exact(blk) -> tuple[int, bool]:
     return max(-128, min(127, se)), True
 
 
+def _readout(acc: int) -> float:
+    """The kernel's read-out rounding of a 256-bit two's-complement accumulator."""
+    acc &= (1 << 256) - 1
+    neg = (acc >> 255) & 1
+    mag = ((~acc) + 1) & ((1 << 256) - 1) if neg else acc
+    v = 0.0
+    for i in range(7, -1, -1):
+        v = v * 4294967296.0 + float((mag >> (32 * i)) & 0xFFFFFFFF)
+    v = math.ldexp(v, -QFRAC)
+    return -v if neg else v
+
+
+def _fabric_note() -> str:
+    """Names the fabric PE in the verdict text when it did the accumulation."""
+    if os.environ.get("INVAR_SPOTCHECK_PL"):
+        try:
+            from . import spotcheck_pl
+            return spotcheck_pl.describe()
+        except ImportError:
+            pass
+    return ""
+
+
 def exact_dot(xblocks, yblocks) -> float:
-    """Exact fixed-point accumulation (Python ints) + the kernel's readout rounding."""
+    """Exact fixed-point accumulation (Python ints, or the bp8_dot_pe fabric when
+    INVAR_SPOTCHECK_PL is set) + the kernel's readout rounding."""
+    if os.environ.get("INVAR_SPOTCHECK_PL"):
+        try:
+            from . import spotcheck_pl
+            return _readout(spotcheck_pl.exact_acc_pl(xblocks, yblocks, QFRAC))
+        except ImportError:
+            pass
     acc = 0
     lut_m, lut_e, qfrac = LUT_M, LUT_E, QFRAC
     for (sx, xq), (sy, yq) in zip(xblocks, yblocks):
@@ -172,14 +202,7 @@ def exact_dot(xblocks, yblocks) -> float:
             shift = lut_e[x_code] + lut_e[y_code] + se
             P = m_x * m_y
             acc += (P << shift) if shift >= 0 else (P >> (-shift))
-    acc &= (1 << 256) - 1
-    neg = (acc >> 255) & 1
-    mag = ((~acc) + 1) & ((1 << 256) - 1) if neg else acc
-    v = 0.0
-    for i in range(7, -1, -1):
-        v = v * 4294967296.0 + float((mag >> (32 * i)) & 0xFFFFFFFF)
-    v = math.ldexp(v, -QFRAC)
-    return -v if neg else v
+    return _readout(acc)
 
 
 def f32_bits(x: float) -> int:
@@ -378,7 +401,8 @@ def verify_dump(gguf_path: str, dump_path: str, nonce: bytes, rows: int = 256,
                     first_bad = f"step {si} row {rr}: re-executed {got:08x} vs served {want:08x}"
     if bad:
         return False, f"{bad}/{checked} challenged rows differ ({first_bad})", checked, bad
-    return True, f"{checked} challenged lm_head rows re-executed bit-exactly over {len(steps)} evaluations", checked, 0
+    return True, (f"{checked} challenged lm_head rows re-executed bit-exactly over {len(steps)} evaluations"
+                  + _fabric_note()), checked, 0
 
 
 # ---------------------------------------------------------------- per-matmul units (FFN + attention output)
@@ -430,10 +454,59 @@ ATTN_UNITS = [("attn_norm", "Qcur_mm", "blk.{il}.attn_q.weight"),
               ("kqv_out", "attn_out", "blk.{il}.attn_output.weight")]
 
 
+_W_GGUF = None  # per-worker GGUF handle (opened once by the pool initializer)
+
+
+def _units_init(gguf_path: str):
+    global _W_GGUF
+    _W_GGUF = GGUF(gguf_path)
+
+
+def _verify_layer(task):
+    """One (evaluation, layer) work item: re-execute the challenged rows of every captured
+    unit in that layer. Pure function of (nonce, ei, il, layer rows, units, rows); returns
+    (checked, bad, per_unit_counts, first_mismatch, error). Used by both the sequential
+    and the pooled path so the two are the same computation."""
+    nonce, ei, il, lay, units, rows, gguf_path = task
+    g = _W_GGUF if _W_GGUF is not None else GGUF(gguf_path)
+    checked = bad = 0
+    per: dict[str, int] = {}
+    first = ""
+    xq_cache: dict[str, list] = {}          # K/Q/V share one input, gate/up another: quantise once
+    for inp_names, out_name, wtpl in units:
+        inp_name = next((n for n in inp_names.split("|") if n in lay), None)
+        inp = lay[inp_name] if inp_name is not None else None
+        out = lay.get(out_name)
+        if inp is None or out is None:
+            continue
+        t = g.tensors.get(wtpl.format(il=il))
+        if t is None or t["type"] != GGML_TYPE_BPOSIT8:
+            continue
+        n_in, n_out = t["dims"][0], t["dims"][1]
+        if len(inp) != n_in or len(out) != n_out:
+            return checked, bad, per, first, f"eval {ei} layer {il} {out_name}: shape mismatch"
+        xq = xq_cache.get(inp_name)
+        if xq is None:
+            xq = xq_cache[inp_name] = quantize_row(inp)
+        for r in sampled_rows(nonce + bytes([ei & 0xFF, il & 0xFF]) + out_name.encode(), n_out, rows):
+            got = f32_bits(to_f32(exact_dot(xq, g.bp8_row(t, r))))
+            want = f32_bits(out[r])
+            checked += 1
+            per[out_name] = per.get(out_name, 0) + 1
+            if got != want:
+                bad += 1
+                if not first:
+                    first = f"eval {ei} layer {il} {out_name} row {r}: re-executed {got:08x} vs served {want:08x}"
+    return checked, bad, per, first, ""
+
+
 def verify_units(gguf_path: str, dump_path: str, nonce: bytes, rows: int = 16,
-                 max_evals: int = 0, units=None) -> tuple[bool, str, int, int, dict]:
+                 max_evals: int = 0, units=None, jobs: int = 1) -> tuple[bool, str, int, int, dict]:
     """Re-execute `rows` challenged output rows of every captured matmul unit in every
-    layer of every evaluation. Returns (ok, why, checked, mismatched, per_unit_counts)."""
+    layer of every evaluation. Returns (ok, why, checked, mismatched, per_unit_counts).
+    `jobs` > 1 spreads (evaluation, layer) work items over a process pool; the challenge,
+    the arithmetic and the result are identical to the sequential path (the work items are
+    independent and the reduction is order-preserving)."""
     units = units or (FFN_UNITS + ATTN_UNITS)
     g = GGUF(gguf_path)
     if g.file_type != 42:
@@ -441,38 +514,91 @@ def verify_units(gguf_path: str, dump_path: str, nonce: bytes, rows: int = 16,
     evals = read_dump_units(dump_path)
     if max_evals:
         evals = evals[:max_evals]
+    tasks = [(nonce, ei, il, lay, units, rows, gguf_path)
+             for ei, ev in enumerate(evals) for il, lay in sorted(ev["layers"].items())]
     checked = bad = 0
     per: dict[str, int] = {}
     first = ""
-    for ei, ev in enumerate(evals):
-        for il, lay in sorted(ev["layers"].items()):
-            for inp_names, out_name, wtpl in units:
-                inp = next((lay[n] for n in inp_names.split("|") if n in lay), None)
-                out = lay.get(out_name)
-                if inp is None or out is None:
-                    continue
-                t = g.tensors.get(wtpl.format(il=il))
-                if t is None or t["type"] != GGML_TYPE_BPOSIT8:
-                    continue
-                n_in, n_out = t["dims"][0], t["dims"][1]
-                if len(inp) != n_in or len(out) != n_out:
-                    return False, f"eval {ei} layer {il} {out_name}: shape mismatch", checked, bad, per
-                xq = quantize_row(inp)
-                for r in sampled_rows(nonce + bytes([ei & 0xFF, il & 0xFF]) + out_name.encode(), n_out, rows):
-                    got = f32_bits(to_f32(exact_dot(xq, g.bp8_row(t, r))))
-                    want = f32_bits(out[r])
-                    checked += 1
-                    per[out_name] = per.get(out_name, 0) + 1
-                    if got != want:
-                        bad += 1
-                        if not first:
-                            first = f"eval {ei} layer {il} {out_name} row {r}: re-executed {got:08x} vs served {want:08x}"
+    if jobs and jobs > 1 and os.environ.get("INVAR_SPOTCHECK_PL"):
+        jobs = 1                    # one DMA engine; workers would only serialise on its lock
+    if jobs and jobs > 1 and len(tasks) > 1:
+        import multiprocessing as mp
+        ctx = mp.get_context("fork") if hasattr(mp, "get_context") else mp
+        with ctx.Pool(min(jobs, len(tasks)), initializer=_units_init, initargs=(gguf_path,)) as pool:
+            results = pool.imap(_verify_layer, tasks, chunksize=1)
+            for c, b_, p_, f_, err in results:
+                if err:
+                    pool.terminate()
+                    return False, err, checked, bad, per
+                checked += c
+                bad += b_
+                for k, v in p_.items():
+                    per[k] = per.get(k, 0) + v
+                if f_ and not first:
+                    first = f_
+    else:
+        global _W_GGUF
+        _W_GGUF = g
+        try:
+            for task in tasks:
+                c, b_, p_, f_, err = _verify_layer(task)
+                if err:
+                    return False, err, checked, bad, per
+                checked += c
+                bad += b_
+                for k, v in p_.items():
+                    per[k] = per.get(k, 0) + v
+                if f_ and not first:
+                    first = f_
+        finally:
+            _W_GGUF = None
     if not checked:
         return False, "no matmul units captured (run the server with INVAR_LOGITS_MATMULS=1)", 0, 0, per
     if bad:
         return False, f"{bad}/{checked} challenged matmul rows differ ({first})", checked, bad, per
     return True, (f"{checked} challenged matmul rows re-executed bit-exactly "
-                  f"({', '.join(f'{k}:{v}' for k, v in sorted(per.items()))}) over {len(evals)} evaluations"), checked, 0, per
+                  f"({', '.join(f'{k}:{v}' for k, v in sorted(per.items()))}) over {len(evals)} evaluations"
+                  + _fabric_note()), checked, 0, per
+
+
+def unit_coverage(gguf_path: str, dump_path: str, rows: int, max_evals: int = 0,
+                  units=None) -> tuple[str, float, int, int]:
+    """How much of the weight space a challenge budget actually samples.
+
+    A spot-check catches a substituted output row only if that row is challenged, so `rows` is a
+    security parameter rather than a performance knob. For each captured unit this is the
+    probability that a single substituted row would be caught, 1-(1-rows/n_out)**evals; the weakest
+    unit is returned, i.e. the widest tensor, which is where an adversary would hide.
+
+    Measured against a real one-bit weight substitution the analytic value tracks the observed
+    detection rate closely (13.3%/43.3%/63.3% at 8/32/64 rows) — see
+    research/substitution_detection/FINDINGS.md.
+
+    Returns (unit_name, probability, n_out, n_evals); ("", 0.0, 0, 0) if nothing was captured.
+    """
+    units = units or (FFN_UNITS + ATTN_UNITS)
+    g = GGUF(gguf_path)
+    evals = read_dump_units(dump_path)
+    if max_evals:
+        evals = evals[:max_evals]
+    widest: dict[str, int] = {}
+    for ev in evals:
+        for il, lay in ev["layers"].items():
+            for _inp, out, wtmpl in units:
+                if out not in lay:
+                    continue
+                t = g.tensors.get(wtmpl.format(il=il))
+                if not t or len(t["dims"]) < 2:
+                    continue
+                widest[out] = max(widest.get(out, 0), int(t["dims"][1]))
+    if not widest or not evals:
+        return "", 0.0, 0, 0
+    worst_name, worst_p, worst_n = "", 2.0, 0
+    for name, n in widest.items():
+        p = 1.0 - (1.0 - min(1.0, rows / n)) ** len(evals)
+        if p < worst_p:
+            worst_name, worst_p, worst_n = name, p, n
+    return worst_name, worst_p, worst_n, len(evals)
 
 
 # ---------------------------------------------------------------- elementwise ops (ggml-det), cross-implementation

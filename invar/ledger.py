@@ -38,6 +38,7 @@ class _Server(ThreadingHTTPServer):
 from urllib.parse import parse_qs, urlparse
 
 from .attest import AttestationBinding
+from .worldline import text_copies_mismatch
 from .crcore import certificate_of, digest_bytes
 from .hwsign import verify_signature
 from .tlog import TransparencyLog
@@ -94,6 +95,8 @@ class LedgerStore:
             return False, "no manifest"
         if certificate_of(m) != entry.get("certificate"):
             return False, "certificate mismatch"
+        if (bad := text_copies_mismatch(entry)):
+            return False, bad
         if m.get("prev_chain") != prev:
             # a device's FIRST entry may start at an attestation-bound genesis: the
             # binding is self-describing (evidence digest + nonce are certified in

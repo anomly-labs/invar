@@ -61,45 +61,51 @@ def main() -> int:
     open(src, "w").write(HARNESS)
     exe = os.path.join(tmp, "h")
     subprocess.run([cc, "-O2", "-ffp-contract=off", "-I", det_dir, src, "-o", exe, "-lm"], check=True)
-    rnd = random.Random(20260905)
-    cases, expect = [], []
+    seed = int(os.environ.get("INVAR_DETMATH_SEED", "20260905"))
+    rnd = random.Random(seed)
+    # go_fields mirrors `cases` but in the field order the Go conformance test parses, which is
+    # NOT the C harness's input order (rope in particular reorders nd and fbase, and rms carries an
+    # eps the Go side does not read). Emitting it explicitly keeps the two from silently drifting.
+    cases, expect, go_fields = [], [], []
 
     def rf(lo, hi):
         return dm.f32(rnd.uniform(lo, hi))
     for _ in range(4000):
         x = rf(-110, 95)
-        cases.append(f"expf {x!r}"); expect.append(("f", dm.expf(x)))
+        cases.append(f"expf {x!r}"); go_fields.append(f"expf {x!r}"); expect.append(("f", dm.expf(x)))
         x = rf(-30, 30)
-        cases.append(f"silu {x!r}"); expect.append(("f", dm.siluf(x)))
+        cases.append(f"silu {x!r}"); go_fields.append(f"silu {x!r}"); expect.append(("f", dm.siluf(x)))
         t = rf(-20000, 20000)
-        cases.append(f"sincos {t!r}"); expect.append(("ff", dm.sincosf(t)))
+        cases.append(f"sincos {t!r}"); go_fields.append(f"sincos {t!r}"); expect.append(("ff", dm.sincosf(t)))
         v = rnd.uniform(1e-6, 1e6)
-        cases.append(f"log2 {v!r}"); expect.append(("d", dm.log2_d(v)))
+        cases.append(f"log2 {v!r}"); go_fields.append(f"log2 {v!r}"); expect.append(("d", dm.log2_d(v)))
         y = rnd.uniform(-60, 60)
-        cases.append(f"exp2 {y!r}"); expect.append(("d", dm.exp2_d(y)))
+        cases.append(f"exp2 {y!r}"); go_fields.append(f"exp2 {y!r}"); expect.append(("d", dm.exp2_d(y)))
         pos, i, nd, fbse = rnd.randint(0, 8192), rnd.randint(0, 63), rnd.choice([32, 64, 128]), rnd.choice([10000.0, 500000.0, 1000000.0])
         i = i % (nd // 2)
-        cases.append(f"rope {pos} {i} {fbse!r} 0 {nd}"); expect.append(("ff", dm.rope_sincos(pos, i, nd, fbse, 1.0)))
+        cases.append(f"rope {pos} {i} {fbse!r} 0 {nd}"); go_fields.append(f"rope {pos} {i} {nd} {fbse!r}"); expect.append(("ff", dm.rope_sincos(pos, i, nd, fbse, 1.0)))
     for _ in range(3000):
         x = rf(-12, 12)
-        cases.append(f"gelu {x!r}"); expect.append(("f", dm.geluf(x)))
+        cases.append(f"gelu {x!r}"); go_fields.append(f"gelu {x!r}"); expect.append(("f", dm.geluf(x)))
     for _ in range(2000):
         pos, nd, fbse = rnd.randint(0, 8192), 64, 500000.0
         i = rnd.randint(0, nd // 2 - 1)
         ff = dm.f32(rnd.choice([1.0, 4.0, 32.0, rnd.uniform(1.0, 32.0)]))
-        cases.append(f"ropeff {pos} {i} {nd} {fbse!r} {ff!r}"); expect.append(("ff", dm.rope_sincos_ff(pos, i, nd, fbse, 1.0, ff)))
+        cases.append(f"ropeff {pos} {i} {nd} {fbse!r} {ff!r}"); go_fields.append(f"ropeff {pos} {i} {nd} {fbse!r} {ff!r}"); expect.append(("ff", dm.rope_sincos_ff(pos, i, nd, fbse, 1.0, ff)))
     for x in [0.0, -0.0, 1e-45, -1e-45, 88.75, 88.8, -103.9, -104.0, -87.5, float("inf"), float("-inf"), float("nan"), 1.0, -1.0, 0.5]:
-        cases.append(f"expf {x!r}"); expect.append(("f", dm.expf(x)))
+        cases.append(f"expf {x!r}"); go_fields.append(f"expf {x!r}"); expect.append(("f", dm.expf(x)))
     for _ in range(300):
         n = rnd.choice([32, 64, 576, 2048])
         xs = [rf(-8, 8) * dm.f32(2.0 ** rnd.randint(-20, 20)) for _ in range(n)]
         eps = dm.f32(1e-5)
         cases.append("rms %d %s %r" % (n, " ".join(repr(v) for v in xs), eps))
+        go_fields.append("rms %d %s" % (n, " ".join(repr(v) for v in xs)))  # Go does not read eps
         S = dm.sumsq_f32_exact(xs)
         expect.append(("dS", (S, dm.rms_scale(S, n, eps))))
         m = rnd.choice([1, 7, 41, 256, 1024])
         xs = [rf(-40, 12) for _ in range(m)]
         cases.append("softmax %d %s" % (m, " ".join(repr(v) for v in xs)))
+        go_fields.append("softmax %d %s" % (m, " ".join(repr(v) for v in xs)))
         expect.append(("fs", dm.soft_max_row(xs)))
     inp = os.path.join(tmp, "in.txt")
     open(inp, "w").write("\n".join(cases) + "\n")
@@ -122,6 +128,13 @@ def main() -> int:
             fails += 1
             if fails <= 5:
                 print("MISMATCH", case[:80], "C:", line[:60], "py:", val if not isinstance(val, list) else val[:3])
+    emit = os.environ.get("INVAR_DETMATH_EMIT_GO")
+    if emit:
+        assert len(go_fields) == len(out), (len(go_fields), len(out))
+        with open(emit, "w") as fh:
+            for gf, line in zip(go_fields, out):
+                fh.write(gf + " " + line.strip() + "\n")
+        print(f"wrote {len(go_fields)} Go conformance cases (seed {seed}) to {emit}")
     print(f"detmath conformance vs C ggml-det: {len(expect) - fails}/{len(expect)} bit-exact")
     return 1 if fails else 0
 

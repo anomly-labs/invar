@@ -49,3 +49,20 @@ python3 tests/test_invar.py
 pip install coverage
 coverage run tests/unit_tests.py && coverage report -m
 ```
+
+## Regenerating the Go detmath conformance corpus
+
+`tests/test_detmath.py` checks the Python `invar.detmath` port against the C `ggml-det` library.
+With `INVAR_DETMATH_EMIT_GO` it also writes the same C-derived expectations in the field order the
+Go conformance test parses, so all three implementations can be checked against one corpus:
+
+    INVAR_DETMATH_SEED=424242 INVAR_DETMATH_EMIT_GO=/tmp/cases.txt python3 tests/test_detmath.py
+    INVAR_DETMATH_CASES=/tmp/cases.txt go test -run DetmathConformance ./...
+
+The Go field order is **not** the C harness's input order — `rope` reorders `nd` and `fbase`, and
+`rms` carries an `eps` the Go side does not read. That is why the emitter builds Go lines explicitly
+rather than reusing the C input strings; concatenating them would produce a corpus the Go test
+silently misparses.
+
+Checked on three seeds (20260905, 1, 424242): 29,615/29,615 bit-exact for both C-vs-Python and
+Go-vs-C on each.

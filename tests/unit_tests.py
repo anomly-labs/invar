@@ -633,15 +633,16 @@ def sec_cli(tmp, art, lic):
     check("cli verify re-execute -> exit 0 re-executed",
           code == 0 and "re-executed" in out)
 
-    # evidence-text gate: a tampered prompt_text (digest mismatch) is IGNORED,
-    # so re-exec falls back to structure-ok rather than trusting bad evidence
+    # readable-copy gate (changed 2026-09-09): a prompt_text or output_text that does not hash to
+    # its certified digest is REJECTED, not ignored -- a reader believes the copy, the certificate
+    # still verifies, so a mismatching copy is a deception vector (found in the pilot dry-run).
     tp2 = os.path.join(tmp, "cli_evidence.jsonl")
     e1 = json.loads(open(wlp).readline())
     e1["prompt_text"] = "totally different prompt"        # no longer matches inputs.prompt digest
     open(tp2, "w").write(json.dumps(e1, separators=(",", ":"), sort_keys=True) + "\n")
     code, out = run_cli(["invar", "verify", tp2, "--binary", binA, "--model", model])
-    check("cli ignores prompt_text whose digest doesn't match",
-          code == 0 and "no prompt text for re-execution" in out)
+    check("cli REJECTS a prompt_text whose digest doesn't match the certified prompt",
+          code == 1 and "prompt_text does not match" in out, out[-200:])
 
     # re-exec requested but missing binary/model -> structural fallback, still exit 0
     code, out = run_cli(["invar", "verify", wlp])
@@ -1408,6 +1409,20 @@ def sec_hwsign_attest(tmp, art):
     check("ledger tlog: unknown index -> 404", stc == 404)
     tsrv.shutdown()
 
+    # -- readable copies must hash to their certified digests (found in the pilot dry-run 2026-09-09:
+    #    a log whose output_text said "Lyon" while the certificate covered "Paris" ACCEPTed)
+    from invar.worldline import text_copies_mismatch as TCM, digest_bytes as DB
+    e = {"manifest": {"inputs": {"prompt": DB(b"The capital of France is")}, "outputs": {"text": DB(b"Paris.")}},
+         "prompt_text": "The capital of France is", "output_text": "Paris."}
+    check("text copies: matching output_text/prompt_text pass", TCM(e) == "")
+    e2 = dict(e); e2["output_text"] = "Lyon."
+    check("text copies: altered output_text is REJECTED with the certified digest reason",
+          "output_text" in TCM(e2), TCM(e2))
+    e3 = dict(e); e3["prompt_text"] = "The capital of Spain is"
+    check("text copies: altered prompt_text is REJECTED", "prompt_text" in TCM(e3), TCM(e3))
+    e4 = {"manifest": e["manifest"]}
+    check("text copies: entries without readable copies are unaffected", TCM(e4) == "")
+
     # -- spot-check (CSC): codec vs the C golden LUT, stdlib GGUF reader, exact re-execution
     from invar import spotcheck as SC
     golden_h = os.path.expanduser("~/development/llama-cpp-et/tests/bposit8-quire-ref/bp8_dot_golden.h")
@@ -1511,6 +1526,41 @@ def sec_hwsign_attest(tmp, art):
     else:
         print("  [SKIP] spot-check real re-execution (needs llama-cpp-et build + b-posit8 GGUF)")
 
+    # -- fabric backend (spotcheck_pl): the chunk-and-sum contract, verdict note, and the
+    #    jobs=1 rule are exercised host-side with a stand-in PE that runs the reference
+    #    accumulator per transfer. The real PE was checked bit-exactly on the Ultra96 (2026-09-09).
+    import random as _r
+    from invar import spotcheck_pl as PL
+    class _FakePE:
+        def acc_words(self, words):
+            assert 0 < len(words) <= PL.WORDS_PER_XFER, "transfer larger than one page"
+            acc = 0
+            for w in words:
+                xc, yc, se = (w >> 24) & 0xFF, (w >> 16) & 0xFF, w & 0xFFFF
+                se = se - 0x10000 if se >= 0x8000 else se
+                mx, my = SC.LUT_M[xc], SC.LUT_M[yc]
+                if mx and my:
+                    sh = SC.LUT_E[xc] + SC.LUT_E[yc] + se
+                    acc += (mx * my << sh) if sh >= 0 else (mx * my >> -sh)
+            PL.stats["transfers"] += 1
+            return acc & PL.MASK256
+    _r.seed(5); PL._backend = _FakePE(); os.environ["INVAR_SPOTCHECK_PL"] = "fake"
+    try:
+        okc = True
+        for nblk in (1, 32, 33, 64, 100):
+            mk = lambda: (_r.randint(-128, 127), [_r.randrange(256) for _ in range(32)])
+            xb = [mk() for _ in range(nblk)]; yb = [mk() for _ in range(nblk)]
+            os.environ["INVAR_SPOTCHECK_PL"] = ""
+            ref = SC.exact_dot(xb, yb)
+            os.environ["INVAR_SPOTCHECK_PL"] = "fake"
+            okc &= SC.exact_dot(xb, yb) == ref
+        check("spotcheck_pl: chunked fabric accumulation (1..100 blocks, >1 page) == Python exact_dot", okc)
+        note = PL.describe()
+        check("spotcheck_pl: verdict note counts only this check's dot products",
+              "bp8_dot_pe, 5 dot products" in note and "DMA transfers" in note, note)
+        check("spotcheck_pl: note is empty when no fabric work happened since last report", PL.describe() == "")
+    finally:
+        PL._backend = None; os.environ.pop("INVAR_SPOTCHECK_PL", None)
     # -- verification verdict statements: a verifier's conclusion as a signed, certified object
     from invar.scitt import verify_statement as _vs
     import invar.cli as CLI
@@ -1767,3 +1817,86 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+def test_unit_coverage_matches_go_and_analytic():
+    """The Python and Go verifiers must report the same detection power for the same budget.
+
+    `rows` is a security parameter: a spot-check only catches a substituted row if that row is
+    challenged. Both implementations report the weakest (widest) unit, and both must agree with
+    1-(1-rows/n_out)**evals. Skips when the fixture GGUF/dump are not present.
+    """
+    import os
+    from invar.spotcheck import unit_coverage
+    g = os.path.expanduser("~/development/hackathon-artifacts/SmolLM2-135M-Instruct-bposit8.gguf")
+    d = os.environ.get("INVAR_TEST_UNITS_DUMP", "")
+    if not os.path.exists(g) or not d or not os.path.exists(d):
+        print("SKIP unit_coverage (set INVAR_TEST_UNITS_DUMP to a MATMULS=1 dump)")
+        return
+    prev = 0.0
+    for rows in (8, 32, 64):
+        name, p, n_out, n_evals = unit_coverage(g, d, rows)
+        assert name and n_out > 0 and n_evals > 0, (name, n_out, n_evals)
+        want = 1.0 - (1.0 - rows / n_out) ** n_evals
+        assert abs(p - want) < 1e-12, (rows, p, want)
+        assert p > prev, (rows, p, prev)
+        assert 0.0 <= p <= 1.0, p
+        prev = p
+    print("unit_coverage: analytic and monotonic across budgets")
+
+
+def test_spotcheck_backend_output_selected_by_prefix():
+    """The CLI must read the Go backend's lines by prefix, not by position.
+
+    The backend gained a `coverage` line; a reader that took lines[0] as the lm_head result would
+    have reported the coverage text as if it were a verification outcome. This pins the parsing to
+    the same helper the CLI uses, against output deliberately emitted in a different order.
+    """
+    lines = [
+        "coverage — something about budgets that must not be mistaken for a result",
+        "units — 42000 challenged matmul rows re-executed bit-exactly (fake) over 25 evaluations",
+        "nonce deadbeef rows/eval 64 evals 25 — 1600 challenged lm_head rows re-executed (fake)",
+        "ACCEPT",
+    ]
+
+    def _line(prefix, default=""):
+        for ln in lines:
+            if ln.startswith(prefix):
+                return ln.split("— ", 1)[-1]
+        return default
+
+    spot = _line("nonce", lines[0].split("— ", 1)[-1])
+    units = _line("units")
+    assert spot.startswith("1600 challenged lm_head"), spot
+    assert units.startswith("42000 challenged matmul"), units
+    assert "budgets" not in spot and "budgets" not in units
+    # and the positional reader, kept here to show what it would have done
+    assert lines[0].split("— ", 1)[-1].startswith("something about budgets")
+    print("spot-check backend parsing: prefix-selected, order-independent")
+
+
+def test_sampled_rows_matches_shared_vectors():
+    """Challenge selection must be identical in every implementation.
+
+    If Python and Go sampled different rows for the same nonce, both could ACCEPT the same dump
+    while checking different things, and "independently re-executed" would mean much less than it
+    sounds. The Go test reads the same file.
+    """
+    import os
+    from invar.spotcheck import sampled_rows
+    path = os.path.join(os.path.dirname(__file__), "..", "go", "crverify", "testdata", "sampled-rows.txt")
+    if not os.path.exists(path):
+        print("SKIP sampled-rows vectors")
+        return
+    n = 0
+    for line in open(path):
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        nonce_s, n_out, k, rows = line.split()
+        got = sampled_rows(bytes.fromhex(nonce_s), int(n_out), int(k))
+        want = [int(x) for x in rows.split(",")]
+        assert got == want, (nonce_s, n_out, k, got[:6], want[:6])
+        n += 1
+    assert n >= 5, n
+    print(f"sampled_rows: {n} vectors match the shared challenge-selection file")

@@ -91,6 +91,69 @@ logits.jsonl -rows 512`. It is tested against Python-produced expected values on
 dump and the real GGUF. Measured: **4,096 challenged rows in 0.05 s** (Python: 3.8 s).
 Three implementations, no shared code, one bit pattern.
 
+## Fabric implementation (bp8_dot_pe on Zynq UltraScale+, 2026-09-09)
+
+A fourth implementation is a **hardware exact accumulator**: `hardware/bp8dot/bp8_dot_pe.v`, a
+256-bit quire processing element behind an AXI DMA, built for the Ultra96 (and KV260). Set
+`INVAR_SPOTCHECK_PL=raw` and the Python verifier's `exact_dot` sends each challenged row's
+`{x_code, y_code, scale}` words to the PE and takes the 256-bit accumulator back; the read-out
+rounding stays in Python, so the verdict is the same function bit for bit. Rows longer than one
+page (1024 words) are sent as chunks and the chunk accumulators are added mod 2^256 — exact
+accumulation is grouping-independent, so this is the value one transfer would give. Verdict
+lines name the fabric when it did the work (`exact accumulation in fabric: bp8_dot_pe, N dot
+products, M DMA transfers`).
+
+`invar/spotcheck_pl.py` needs no PYNQ: it programs the PS-PL port widths, locks two pages,
+cleans them to the point of coherency (`invar/bp8_flush.c`, compiled on the board with the
+system gcc), and drives the DMA registers through `/dev/mem`, with `dsb` barriers between the
+write-combining buffer and the Device-memory registers. Each of those steps was a measured
+failure without it — see `hardware/bp8dot/README.md` for the four stacked causes.
+
+The Go verifier has the same backend with no cgo (`go/crverify/fabric_linux_arm64.go` +
+`fabric_arm64.s`, the cache maintenance as raw `dc civac`/`dsb` words); `INVAR_SPOTCHECK_PL=raw
+invar-spotcheck …` prints `exact accumulation: bp8_dot_pe fabric` and a `fabric —` line with
+the dot-product and transfer counts. A fabric error is fatal, never a silent fallback to
+software — the verdict must name the implementation that produced it.
+
+Measured on the Ultra96 (A53 @ 1.2 GHz, PL @ 100 MHz), 2026-09-09, three-entry SmolLM2-135M
+worldline (rows 256, unit-rows 8, elementwise: 158,775 rows, of which 145,200 are dot products):
+
+| Go verifier, whole worldline | jobs=1 | jobs=4 |
+|---|---|---|
+| software, per-term big.Int accumulation (before 2026-09-09) | 49 s | 20 s |
+| software, anchored-block accumulation (current) | **26 s** | **15 s** |
+| fabric (bp8_dot_pe v2, batched) | 26 s | 15 s |
+
+lm_head check alone (6,400 rows): per-term software 1.16 s, anchored software 0.35 s, fabric 0.30 s.
+The anchored accumulator (`exactAccSoftware`: each 32-block's products summed exactly in an int64
+at the block's smallest shift, one big.Int placement per block instead of 32; equivalence test
+`TestExactAccAnchoredEqualsPerTerm`) closed the gap: **on this board the fabric no longer saves
+time** — the verifier is bound by dump parsing, quantisation and weight-row decoding, and the exact
+accumulation is a few percent either way. The fabric path's value is the substrate (an independent
+hardware implementation reaching the same bits), not speed. Fabric transfers: 5,275 for
+48,400 dot products per entry (v2 carries a whole challenge set per DMA round trip; v1 needed one
+transfer per row and gave 0.45 s / 86 s).
+
+- PE bit-exact against the Python accumulator on 297/297 generator vectors (three full runs),
+  300/300 synthetic rows up to 4096 words, 200/200 real 2048-wide rows of the SmolLM2-1.7B
+  b-posit8 weights; v2 batching: 400 rows in 153 mixed batches in simulation, self-test on
+  silicon, verdicts identical to the software path on all three entries.
+- **Python verifier** with the fabric backend: ALL ACCEPT, 1,700 s vs 1,761 s software — Python
+  is bound by its own quantisation and row decoding, not by the accumulator.
+- Tamper control on the same path: one hex digit of one *challenged* served logit changed in a
+  copy of the dump → `1/6400 challenged rows differ (step 0 row 24476: re-executed 4193c438 vs
+  served 41930438)` → **REJECT**, with the fabric doing all 6,400 re-executions. (A change to a
+  non-challenged row is, by design, not seen at this budget — see the coverage line.)
+
+Where the time goes (pprof on the A53, v2 fabric, one entry): the fabric transfer is 2.7% of the
+run; 64% was the b-posit8 *encoder* quantising activation rows by a 256-code linear scan. Replacing
+it with the bisect encoder Python already used (proved equal on **every finite float32**, 2^32
+patterns) halved the software path too, and quantising each shared layer input once (K/Q/V share
+one, gate/up another) took another 8% — the 49 s / 20 s above are with both; the previous software
+numbers were 110 s / 41 s.
+
+Four implementations — Python, C (llama-cpp-et), Go, silicon — one bit pattern.
+
 
 ## Per-layer rows (localisation, not yet re-execution)
 
@@ -173,3 +236,30 @@ gate, up and down, and the lm_head. What stays deployment-pinned (same binary
 reproduces it, but no cross-implementation claim): RMSNorm, RoPE, the softmax, the
 SiLU, and the attention score/value products, all float32 elementwise or attention ops
 in the graph.
+
+## The challenge budget is a security parameter
+
+`--unit-rows` decides how much of the weight space each entry samples. A substituted output row is
+only caught if that row is challenged, so the flag sets a detection probability, not a speed/accuracy
+trade. `invar verify --spot-check --units` now states it up front:
+
+    coverage 64 of 1536 rows per evaluation on the widest unit (ffn_gate), 25 evaluations:
+    a single substituted row is caught with probability 0.65 per entry, 0.96 across the 3 entries here
+
+The figure is for the **weakest** unit — the widest tensor, where an adversary would hide a
+substituted row — and it is computed in Python so both the Go and Python backends report the same
+number. Measured against a real one-bit weight substitution, the analytic value tracks the observed
+detection rate (13.3% / 43.3% / 63.3% at 8 / 32 / 64 rows, zero false positives):
+`research/substitution_detection/FINDINGS.md`.
+
+Two different strengths, which should not be conflated:
+
+- **A changed delivered output** is caught deterministically, because verification recomputes the
+  challenged rows and compares them with what was served.
+- **Changed weights** are caught probabilistically at the rate above — unless the substitution is
+  structural, in which case it is refused outright:
+
+      entry 0: REJECT — spot-check: tensor type 8 is not b-posit8
+
+  That is the same model served with cheaper embedding quantisation. A different architecture fails
+  the shape check the same way.

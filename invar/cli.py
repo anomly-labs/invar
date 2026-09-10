@@ -187,6 +187,7 @@ def main():
                    help="with --spot-check: also re-execute challenged rows of every layer's "
                         "FFN/attn-out matmuls (dump must have been made with --spot-check-units)")
     v.add_argument("--unit-rows", type=int, default=8, help="challenged rows per matmul unit")
+    v.add_argument("--jobs", type=int, default=0, help="worker processes for the unit spot-check (0 = all cores)")
     v.add_argument("--verdict-out", default=None,
                    help="write a signed verification verdict (COSE_Sign1 over a certified "
                         "verdict manifest: worldline digest, per-entry verdicts, checks run, "
@@ -428,10 +429,30 @@ def main():
         dumps_dir = a.worldline + ".dumps"
         entries = [json.loads(l) for l in open(a.worldline)]
         new_results = []
+        coverage_printed = False
         for (i, ok, why), e in zip(results, entries):
             sc = e["manifest"].get("computation", {}).get("spot_check")
             if ok and sc:
                 path = os.path.join(dumps_dir, sc["dump_digest"].split(":", 1)[1] + ".jsonl")
+                if a.units and not coverage_printed and os.path.exists(path):
+                    # The challenge budget is a security parameter: a substituted output row is only
+                    # caught if it is challenged. Say so up front, for the weakest (widest) unit.
+                    # Computed here rather than parsed from a backend so both backends report it.
+                    coverage_printed = True
+                    try:
+                        from .spotcheck import unit_coverage
+                        uname, prob, n_out, n_ev = unit_coverage(a.model, path, a.unit_rows)
+                        if uname:
+                            msg = (f"coverage {a.unit_rows} of {n_out} rows per evaluation on the widest "
+                                   f"unit ({uname}), {n_ev} evaluations: a single substituted row is caught "
+                                   f"with probability {prob:.2f} per entry")
+                            n_ent = sum(1 for x in entries
+                                        if x["manifest"].get("computation", {}).get("spot_check"))
+                            if n_ent > 1:
+                                msg += f", {1 - (1 - prob) ** n_ent:.2f} across the {n_ent} entries here"
+                            print(msg + " (raise --unit-rows for more)")
+                    except Exception as exc:        # never let a reporting line fail a verification
+                        print(f"coverage unavailable ({exc})")
                 if not os.path.exists(path):
                     ok, why = False, "spot-check dump missing"
                 elif dump_digest(path) != sc["dump_digest"]:
@@ -446,11 +467,20 @@ def main():
                         r = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
                         sok = r.returncode == 0
                         lines = r.stdout.strip().splitlines() or ["(no output)"]
-                        swhy = lines[0].split("— ", 1)[-1] + " [go]"
+                        # Select the backend's lines by prefix, never by index: the tool may add
+                        # lines (it now prints a coverage line), and an index-based reader would
+                        # silently attribute the wrong text to a verification result.
+                        def _line(prefix, default=""):
+                            for ln in lines:
+                                if ln.startswith(prefix):
+                                    return ln.split("— ", 1)[-1]
+                            return default
+                        swhy = _line("nonce", lines[0].split("— ", 1)[-1]) + " [go]"
                         ok = ok and sok
                         why += "; spot-check: " + swhy
-                        if a.units and len(lines) > 1 and lines[1].startswith("units"):
-                            why += "; units: " + lines[1].split("— ", 1)[-1] + " [go]"
+                        uline = _line("units")
+                        if a.units and uline:
+                            why += "; units: " + uline + " [go]"
                         if ok and a.units:
                             from .spotcheck import verify_elementwise
                             eok, ewhy, _, _, _ = verify_elementwise(a.model, path)
@@ -463,7 +493,8 @@ def main():
                         if ok and a.units:
                             from .spotcheck import verify_units
                             uok, uwhy, _, _, _ = verify_units(a.model, path, nonce + i.to_bytes(4, "big") + b"u",
-                                                              rows=a.unit_rows)
+                                                              rows=a.unit_rows,
+                                                              jobs=(a.jobs or (os.cpu_count() or 1)))
                             ok = ok and uok
                             why += "; units: " + uwhy
                             if ok:

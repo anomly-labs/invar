@@ -21,6 +21,8 @@ import (
 	"math"
 	"math/big"
 	"os"
+	"sort"
+	"sync"
 )
 
 const (
@@ -97,7 +99,55 @@ func bp8CodeToME(p uint8) (int64, int) {
 	return m, 4*k + e - fw
 }
 
+// bp8SortedVals is the finite code values in ascending order with their codes, for the
+// bisect encoder. Values are unique per finite code.
+var bp8SortedVals []struct {
+	v float64
+	c uint8
+}
+
+func init() {
+	for c := 0; c < 256; c++ {
+		if c == bp8NaR {
+			continue
+		}
+		bp8SortedVals = append(bp8SortedVals, struct {
+			v float64
+			c uint8
+		}{bp8Val[c], uint8(c)})
+	}
+	sort.Slice(bp8SortedVals, func(i, j int) bool { return bp8SortedVals[i].v < bp8SortedVals[j].v })
+}
+
+// bp8EncodeNearest is the bisect form of the reference linear scan (bp8EncodeNearestLinear),
+// same result for every input: nearest finite code, ties to the lowest code number, and when
+// |x| absorbs every code (bestd >= |x|) the linear scan's answer. It mirrors
+// invar/spotcheck.py encode_nearest. Measured on the Ultra96 the linear scan was 64% of a
+// whole verification run (profile 2026-09-09).
 func bp8EncodeNearest(x float64) uint8 {
+	if x == 0 {
+		return bp8Zero
+	}
+	sv := bp8SortedVals
+	pos := sort.Search(len(sv), func(i int) bool { return sv[i].v >= x })
+	best, bestd := uint8(bp8Zero), math.Inf(1)
+	for k := pos - 1; k <= pos+1; k++ {
+		if k < 0 || k >= len(sv) {
+			continue
+		}
+		d := math.Abs(sv[k].v - x)
+		if d < bestd || (d == bestd && sv[k].c < best) {
+			bestd, best = d, sv[k].c
+		}
+	}
+	if bestd >= math.Abs(x) {
+		return bp8EncodeNearestLinear(x)
+	}
+	return best
+}
+
+// bp8EncodeNearestLinear is the reference: scan all codes, first minimum wins.
+func bp8EncodeNearestLinear(x float64) uint8 {
 	if x == 0 {
 		return bp8Zero
 	}
@@ -146,6 +196,75 @@ var (
 // ExactDot accumulates every product exactly (big.Int at fixed point 2^-96, per-term floor
 // for sub-radix shifts) and applies the kernel's single readout rounding.
 func ExactDot(xb, yb []Block) float64 {
+	if fabric != nil {
+		return readout(exactAccFabric(xb, yb))
+	}
+	return readout(exactAccSoftware(xb, yb))
+}
+
+// exactAccSoftware is the exact accumulator, masked to 256 bits two's complement. Per
+// block the products are anchored at the block's smallest shift and summed exactly in an
+// int64 (|P| < 2^10, so a shift range of 48 bits and 32 terms stay under 2^63), and that
+// one integer is placed into the big.Int at the anchor -- the same integer as the 32
+// per-term placements, with 32x fewer big.Int operations. Blocks with a sub-radix term
+// (the reference truncates PER TERM there) or a wider range take the per-term path.
+// Equivalence to the per-term form: TestExactAccAnchoredEqualsPerTerm.
+func exactAccSoftware(xb, yb []Block) *big.Int {
+	acc := new(big.Int)
+	t := new(big.Int)
+	var ps, shs [bp8QK]int64
+	for b := range xb {
+		se := int(xb[b].Scale) + int(yb[b].Scale) + bp8QFrac
+		smin, smax := int64(1<<30), int64(-(1 << 30))
+		for j := 0; j < bp8QK; j++ {
+			p := bp8M[xb[b].Codes[j]] * bp8M[yb[b].Codes[j]]
+			ps[j] = p
+			if p == 0 {
+				continue
+			}
+			sh := int64(bp8E[xb[b].Codes[j]] + bp8E[yb[b].Codes[j]] + se)
+			shs[j] = sh
+			if sh < smin {
+				smin = sh
+			}
+			if sh > smax {
+				smax = sh
+			}
+		}
+		if smin == 1<<30 {
+			continue // all-zero block
+		}
+		if smin >= 0 && smax-smin <= 48 {
+			var sum int64
+			for j := 0; j < bp8QK; j++ {
+				if ps[j] != 0 {
+					sum += ps[j] << uint(shs[j]-smin)
+				}
+			}
+			t.SetInt64(sum)
+			t.Lsh(t, uint(smin))
+			acc.Add(acc, t)
+			continue
+		}
+		for j := 0; j < bp8QK; j++ {
+			if ps[j] == 0 {
+				continue
+			}
+			t.SetInt64(ps[j])
+			if shs[j] >= 0 {
+				t.Lsh(t, uint(shs[j]))
+			} else {
+				t.Rsh(t, uint(-shs[j])) // big.Int Rsh floors toward -inf for negatives
+			}
+			acc.Add(acc, t)
+		}
+	}
+	acc.And(acc, mask256)
+	return acc
+}
+
+// exactAccPerTerm is the reference form: every product placed individually.
+func exactAccPerTerm(xb, yb []Block) *big.Int {
 	acc := new(big.Int)
 	t := new(big.Int)
 	for b := range xb {
@@ -160,12 +279,17 @@ func ExactDot(xb, yb []Block) float64 {
 			if shift >= 0 {
 				t.Lsh(t, uint(shift))
 			} else {
-				t.Rsh(t, uint(-shift)) // big.Int Rsh floors toward -inf for negatives
+				t.Rsh(t, uint(-shift))
 			}
 			acc.Add(acc, t)
 		}
 	}
 	acc.And(acc, mask256)
+	return acc
+}
+
+// readout is the kernel's single rounding of the 256-bit accumulator to float64.
+func readout(acc *big.Int) float64 {
 	neg := acc.Bit(255) == 1
 	mag := new(big.Int).Set(acc)
 	if neg {
@@ -199,6 +323,15 @@ type GGUF struct {
 	KV       map[string]any
 	Tensors  map[string]ggufTensor
 	DataBase int64
+
+	fileOnce sync.Once // shared read handle for Row (ReadAt is safe for concurrent use)
+	file     *os.File
+	fileErr  error
+}
+
+func (g *GGUF) handle() (*os.File, error) {
+	g.fileOnce.Do(func() { g.file, g.fileErr = os.Open(g.Path) })
+	return g.file, g.fileErr
 }
 
 func readString(r *bufio.Reader) (string, error) {
@@ -406,11 +539,10 @@ func (g *GGUF) Row(t ggufTensor, row int) ([]Block, error) {
 	}
 	nEmbd := int(t.Dims[0])
 	rowBytes := nEmbd / bp8QK * (1 + bp8QK)
-	f, err := os.Open(g.Path)
+	f, err := g.handle()
 	if err != nil {
 		return nil, err
 	}
-	defer f.Close()
 	buf := make([]byte, rowBytes)
 	if _, err := f.ReadAt(buf, g.DataBase+int64(t.Offset)+int64(row)*int64(rowBytes)); err != nil {
 		return nil, err
@@ -429,6 +561,7 @@ type dumpLine struct {
 	Tensor string `json:"tensor"`
 	N      int    `json:"n"`
 	Hex    string `json:"hex"`
+	Pos    *int   `json:"pos"`
 }
 
 // Eval is one graph evaluation's captured rows.
@@ -532,12 +665,16 @@ func VerifyDump(g *GGUF, evals []Eval, nonce []byte, rows int) SpotResult {
 		}
 		var sb [4]byte
 		binary.BigEndian.PutUint32(sb[:], uint32(si))
-		for _, r := range SampledRows(append(append([]byte{}, nonce...), sb[:]...), nVocab, rows) {
-			wb, err := g.Row(t, r)
-			if err != nil {
+		sampled := SampledRows(append(append([]byte{}, nonce...), sb[:]...), nVocab, rows)
+		wbs := make([][]Block, len(sampled))
+		for i, r := range sampled {
+			if wbs[i], err = g.Row(t, r); err != nil {
 				return SpotResult{Why: err.Error()}
 			}
-			got := math.Float32bits(float32(ExactDot(xq, wb)))
+		}
+		vals := ExactDotRows(xq, wbs) // one fabric transfer per batch, or the per-row loop
+		for i, r := range sampled {
+			got := math.Float32bits(float32(vals[i]))
 			want := math.Float32bits(ev.Logits[r])
 			res.Checked++
 			if got != want {
