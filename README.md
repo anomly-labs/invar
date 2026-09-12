@@ -50,6 +50,8 @@ $ invar certify --url http://localhost:8000/v1 --model my-model --out ./cert
 | L4 | identical to another machine (`--compare`) | — | pass: CUDA, x86, Apple Metal, Cortex-A53, Blackhole bit-identical |
 | L5 | a stranger re-executes the receipts | no receipts | pass |
 
+![invar certify: a stock GPU server fails L0-L2, the INVAR exact profile passes L0-L5](docs/certify-demo.svg)
+
 Measured 2026-09-12; reports and a published run to compare against are in
 [`docs/certify/`](docs/certify/). Details: [`docs/CERTIFY.md`](docs/CERTIFY.md).
 
