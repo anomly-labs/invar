@@ -161,11 +161,13 @@ def collect_tpm_quote(out_path: str, pcrs: str = "sha256:0,1,2,4,7",
     env.setdefault("TPM2TOOLS_TCTI", "device:/dev/tpmrm0")
 
     def run(tool, *args):
+        # bytes, not text: tpm2_getekcertificate (tpm2-tools 5.7, Ubuntu 24.04 on the Kria) writes the DER
+        # certificate to stdout even with -o, and a text decode of it crashed the quote on the KV260
         r = subprocess.run([os.path.join(bin_dir, tool), *args], capture_output=True,
-                           text=True, timeout=60, env=env)
+                           timeout=60, env=env)
         if r.returncode != 0:
-            raise RuntimeError(f"{tool} failed: {r.stderr[-300:]}")
-        return r.stdout
+            raise RuntimeError(f"{tool} failed: {r.stderr.decode('utf-8', 'replace')[-300:]}")
+        return r.stdout.decode("utf-8", "replace")
 
     nonce = nonce or secrets.token_bytes(20)
     with open(P("nonce.bin"), "wb") as f:

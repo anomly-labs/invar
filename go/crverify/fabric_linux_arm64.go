@@ -43,6 +43,7 @@ type rawPE struct {
 	bufSize        int  // bytes per buffer: hugeSize or pageSize
 	batch          bool // the loaded overlay understands end-of-row sentinels
 	lock           *os.File
+	cached      bool // buffers are the cached mapping (STRICT_DEVMEM kernel): flush around transfers
 }
 
 func reg32(m []byte, off int) *uint32 { return (*uint32)(unsafe.Pointer(&m[off])) }
@@ -143,10 +144,15 @@ func EnableFabric() error {
 	if pe.dma, err = mapDev(dmaBase, pageSize); err != nil {
 		return err
 	}
+	// Buffer access: the Ultra96 PYNQ kernel allows an uncached /dev/mem alias of the RAM pages; Ubuntu's
+	// Kria kernel has CONFIG_STRICT_DEVMEM (RAM through /dev/mem -> EPERM), so there the cached mapping is
+	// used directly and dc civac cleans/invalidates it around every transfer (same bytes reach the PE).
 	if pe.din, err = mapDev(pIn, bufSize); err != nil {
-		return err
-	}
-	if pe.dout, err = mapDev(pOut, bufSize); err != nil {
+		if !errors.Is(err, syscall.EPERM) {
+			return err
+		}
+		pe.din, pe.dout, pe.cached = buf[:bufSize], buf[bufSize:2*bufSize], true
+	} else if pe.dout, err = mapDev(pOut, bufSize); err != nil {
 		return err
 	}
 	if pe.lock, err = os.OpenFile(lockPath, os.O_CREATE|os.O_WRONLY, 0o666); err != nil {
@@ -206,6 +212,10 @@ func (pe *rawPE) transfer(words []uint32, outBytes int) error {
 	for i := 0; i < outBytes; i++ {
 		pe.dout[i] = 0
 	}
+	if pe.cached {
+		flushDcache(unsafe.Pointer(&pe.din[0]), uintptr(len(pe.din)))   // input -> DDR
+		flushDcache(unsafe.Pointer(&pe.dout[0]), uintptr(len(pe.dout))) // drop stale output lines
+	}
 	barrier() // buffer (Normal-NC) before registers (Device)
 	// IOC_Irq is sticky (write-1-to-clear) and Idle stays set from the previous transfer
 	// until LENGTH is written; polling either without clearing first returns before the
@@ -223,6 +233,9 @@ func (pe *rawPE) transfer(words []uint32, outBytes int) error {
 	for i := 0; i < 200000000; i++ {
 		if rd(pe.dma, s2mmDMASR)&0x1000 != 0 { // IOC_Irq: this transfer's completion
 			barrier() // status seen before the result is read
+			if pe.cached {
+				flushDcache(unsafe.Pointer(&pe.dout[0]), uintptr(len(pe.dout))) // drop any speculatively cached stale output lines
+			}
 			return nil
 		}
 	}
