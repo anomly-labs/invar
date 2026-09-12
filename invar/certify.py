@@ -68,10 +68,19 @@ def _http(method: str, url: str, headers: dict, body: Optional[dict], timeout: f
     return 429, None
 
 
-def _one(url: str, key: str, model: str, prompt: str, max_tokens: int, top_logprobs: int, seed: int, timeout: float) -> dict:
+def _one(url: str, key: str, model: str, prompt: str, max_tokens: int, top_logprobs: int, seed: int, timeout: float,
+         extra_body: Optional[dict] = None, extra_headers: Optional[dict] = None) -> dict:
     body = {"model": model, "messages": [{"role": "user", "content": prompt}], "temperature": 0,
-            "max_tokens": max_tokens, "seed": seed, "logprobs": True, "top_logprobs": top_logprobs, "stream": False}
+            "max_tokens": max_tokens, "stream": False}
+    if seed is not None and seed >= 0:      # --seed -1: endpoints that reject the seed parameter
+        body["seed"] = seed
+    if top_logprobs > 0:                   # --top-logprobs 0: endpoints that reject logprobs are judged on text
+        body["logprobs"] = True; body["top_logprobs"] = top_logprobs
+    if extra_body:
+        body.update(extra_body)            # e.g. OpenRouter provider pinning: {"provider": {"order": ["Groq"], "allow_fallbacks": false}}
     h = {"Content-Type": "application/json", "User-Agent": TOOL}
+    if extra_headers:
+        h.update(extra_headers)
     if key:
         h["Authorization"] = f"Bearer {key}"
     status, j = _http("POST", f"{url}/chat/completions", h, body, timeout)
@@ -175,11 +184,13 @@ def _obs_digest(passes: list[list[dict]]) -> str:
 def certify(url: str, model: str, *, api_key: str = "", shared: int = 6, fillers: int = 2, long_fillers: int = 0,
             repeats: int = 5, max_tokens: int = 24, top_logprobs: int = 5, seed: int = 0, workers: int = 0,
             timeout: float = 600.0, compare: Optional[dict] = None, compare_label: str = "",
-            reexec_binary: str = "", reexec_model: str = "", reexec_cross_deployment: bool = False, work_dir: str = "", log=print) -> dict:
+            reexec_binary: str = "", reexec_model: str = "", reexec_cross_deployment: bool = False, work_dir: str = "",
+            extra_body: Optional[dict] = None, extra_headers: Optional[dict] = None, log=print) -> dict:
     url = url.rstrip("/")
     reqs = build_workload(shared, fillers, long_fillers)
     workers = workers or len(reqs)
-    kw = dict(url=url, key=api_key, model=model, max_tokens=max_tokens, top_logprobs=top_logprobs, seed=seed, timeout=timeout)
+    kw = dict(url=url, key=api_key, model=model, max_tokens=max_tokens, top_logprobs=top_logprobs, seed=seed, timeout=timeout,
+              extra_body=extra_body, extra_headers=extra_headers)
     t0 = time.perf_counter(); run_pass(reqs, workers, **kw); log(f"priming pass {time.perf_counter()-t0:.1f}s")
     reps = []
     for r in range(repeats):
@@ -201,6 +212,7 @@ def certify(url: str, model: str, *, api_key: str = "", shared: int = 6, fillers
                 if x[0] == "logprob":
                     worst = max(worst, x[3])
     distinct = len({tuple(o.get("obs_sha", "ERR") for o in p) for p in reps})
+    text_changed = sum(1 for i in range(n) if len({p[i].get("text") for p in reps}) > 1)   # requests whose visible words changed across repeats
     # L1: solo == concurrent (against repeat 0)
     solo_diffs = [(i, first_diff(solo[i], reps[0][i])) for i in range(n)]
     solo_diffs = [(i, list(x[:3])) for i, x in solo_diffs if x]
@@ -233,16 +245,17 @@ def certify(url: str, model: str, *, api_key: str = "", shared: int = 6, fillers
     }
     report = {
         "tool": TOOL, "utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "endpoint": url, "model": model,
+        "extra_body": extra_body or {},
         "workload": {"n": n, "shared": shared, "fillers": fillers, "long_fillers": long_fillers, "repeats": repeats,
                      "workers": workers, "max_tokens": max_tokens, "top_logprobs": top_logprobs, "seed": seed,
                      "digest": hashlib.sha256(json.dumps(reqs).encode()).hexdigest()},
         "results": {"distinct_workload_outputs": distinct, "repeat_pairs_differ": len(pair_diffs),
                     "repeat_pairs_total": repeats * (repeats - 1) // 2, "max_logprob_delta": worst,
-                    "token_divergence": token_div, "solo_vs_concurrent_differ": len(solo_diffs), "errors": errors,
+                    "token_divergence": token_div, "requests_text_changed": text_changed, "solo_vs_concurrent_differ": len(solo_diffs), "errors": errors,
                     "cross": cross, "l5": l5, "observations_digest": _obs_digest(reps + [solo])},
         "ladder": ladder,
     }
-    manifest = {"profile": "invar-certify-v0", "tool": TOOL, "endpoint": url, "model": model,
+    manifest = {"profile": "invar-certify-v0", "tool": TOOL, "endpoint": url, "model": model, "extra_body": extra_body or {},
                 "workload_sha256": report["workload"]["digest"], "observations_sha256": report["results"]["observations_digest"],
                 "ladder": ladder, "utc": report["utc"]}
     report["certificate"] = certificate_of(manifest)
@@ -268,15 +281,17 @@ def render_md(rep: dict) -> str:
     r, w, L = rep["results"], rep["workload"], rep["ladder"]
     def yn(v):
         return "not tested" if v is None else ("**pass**" if v else "**fail**")
-    reached = [k for k, v in L.items() if v is True]
-    highest = reached[-1].split("_")[0] if reached else "none"
+    highest = "none"                       # monotone: a rung counts only if every tested rung below it passed
+    for k, v in L.items():
+        if v is True: highest = k.split("_")[0]
+        elif v is False: break
     first_fail = next((k.split("_")[0] for k, v in L.items() if v is False), None)
     verdict = f"**Highest rung passed: {highest}**" + (f"; first failure: {first_fail}" if first_fail else "; no failures among the rungs tested")
     md = [f"# Determinism certification — `{rep['endpoint']}` model `{rep['model']}` ({rep['utc']})", "", verdict, "",
           f"{w['n']} requests ({w['shared']} shared-prefix + {w['fillers']} fillers, {w['long_fillers']} long), {w['workers']} concurrent, "
           f"{w['repeats']} repeats after a priming pass, greedy, seed {w['seed']}, max_tokens {w['max_tokens']}, top_logprobs {w['top_logprobs']}.", "",
           "| level | property | result |", "|---|---|---|",
-          f"| L0 | run-to-run deterministic | {yn(L['L0_run_to_run_deterministic'])} — {r['distinct_workload_outputs']} distinct workload output(s) in {w['repeats']} repeats; {r['repeat_pairs_differ']}/{r['repeat_pairs_total']} pairs differ; max logprob delta {r['max_logprob_delta']:.3e}; token divergence {'yes' if r['token_divergence'] else 'no'} |",
+          f"| L0 | run-to-run deterministic | {yn(L['L0_run_to_run_deterministic'])} — {r['distinct_workload_outputs']} distinct workload output(s) in {w['repeats']} repeats; {r['repeat_pairs_differ']}/{r['repeat_pairs_total']} pairs differ; max logprob delta {r['max_logprob_delta']:.3e}; token divergence {'yes' if r['token_divergence'] else 'no'}; visible text changed for {r.get('requests_text_changed', '?')}/{w['n']} requests |",
           f"| L1 | batch invariant (solo == concurrent) | {yn(L['L1_batch_invariant'])} — {w['n'] - r['solo_vs_concurrent_differ']}/{w['n']} identical |",
           f"| L2 | schedule/shape invariant (long fillers) | {yn(L['L2_schedule_shape_invariant'])} |",
           f"| L3/L4 | identical to a run from another machine | {yn(L['L3_L4_cross_machine_identical'])}" +

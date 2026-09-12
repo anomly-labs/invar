@@ -1,0 +1,33 @@
+{
+ "manifest": {
+  "profile": "invar-certify-v0",
+  "tool": "invar-certify/0.1",
+  "endpoint": "https://openrouter.ai/api/v1",
+  "model": "mistralai/mistral-medium-3.1",
+  "extra_body": {
+   "provider": {
+    "order": [
+     "Mistral"
+    ],
+    "allow_fallbacks": false
+   }
+  },
+  "workload_sha256": "07a380a73708ac6909ed2a0fdf168284ae8cf260fa6023000414f512551ba24e",
+  "observations_sha256": "5212a105a108809100d352b25e7e6c7c5f5e054d2d14ade57d3524368a04684c",
+  "ladder": {
+   "L0_run_to_run_deterministic": false,
+   "L1_batch_invariant": false,
+   "L2_schedule_shape_invariant": false,
+   "L3_L4_cross_machine_identical": null,
+   "L5_third_party_reexecutable": null
+  },
+  "utc": "2026-09-12T17:47:22Z"
+ },
+ "certificate": "sha256:c8f62fb2a1068fed875f817e27c9f37c96759f5bea425267c333bf49c8ff4029",
+ "signature": "34fc964ff18de4900d8f5297f5fc800fbe899caa6ffb4ad277c9b3e4862269ccb7add2578bf0cf57547fbbe73ae464c96a6ff613efa219fe134fc4796e52250a",
+ "signer": {
+  "backend": "software-ed25519",
+  "key_id": "sha256:730f68dcef60314987d017310533aa113417da596265b68eb3b58c1eb2dc60df",
+  "pubkey_pem": "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAhskjvhPX2vdLFZdVBOW/bpRplWr0tYcqiy28Tl20Sqs=\n-----END PUBLIC KEY-----\n"
+ }
+}

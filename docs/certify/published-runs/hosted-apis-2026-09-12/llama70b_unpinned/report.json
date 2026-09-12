@@ -1,0 +1,56 @@
+{
+ "tool": "invar-certify/0.1",
+ "utc": "2026-09-12T17:48:09Z",
+ "endpoint": "https://openrouter.ai/api/v1",
+ "model": "meta-llama/llama-3.3-70b-instruct",
+ "extra_body": {},
+ "workload": {
+  "n": 10,
+  "shared": 6,
+  "fillers": 4,
+  "long_fillers": 2,
+  "repeats": 10,
+  "workers": 10,
+  "max_tokens": 64,
+  "top_logprobs": 5,
+  "seed": 0,
+  "digest": "07a380a73708ac6909ed2a0fdf168284ae8cf260fa6023000414f512551ba24e"
+ },
+ "results": {
+  "distinct_workload_outputs": 10,
+  "repeat_pairs_differ": 45,
+  "repeat_pairs_total": 45,
+  "max_logprob_delta": 0.2256639003753662,
+  "token_divergence": true,
+  "solo_vs_concurrent_differ": 10,
+  "errors": 0,
+  "cross": null,
+  "l5": null,
+  "observations_digest": "853133a65fa152cf769e3724bd98e8199cf4f08f3b719c0dc774a4309cee1b64"
+ },
+ "ladder": {
+  "L0_run_to_run_deterministic": false,
+  "L1_batch_invariant": false,
+  "L2_schedule_shape_invariant": false,
+  "L3_L4_cross_machine_identical": null,
+  "L5_third_party_reexecutable": null
+ },
+ "certificate": "sha256:4ded00929ac30d418905cffc235e112cd67753f605966259b1b152e5b3d62f98",
+ "manifest": {
+  "profile": "invar-certify-v0",
+  "tool": "invar-certify/0.1",
+  "endpoint": "https://openrouter.ai/api/v1",
+  "model": "meta-llama/llama-3.3-70b-instruct",
+  "extra_body": {},
+  "workload_sha256": "07a380a73708ac6909ed2a0fdf168284ae8cf260fa6023000414f512551ba24e",
+  "observations_sha256": "853133a65fa152cf769e3724bd98e8199cf4f08f3b719c0dc774a4309cee1b64",
+  "ladder": {
+   "L0_run_to_run_deterministic": false,
+   "L1_batch_invariant": false,
+   "L2_schedule_shape_invariant": false,
+   "L3_L4_cross_machine_identical": null,
+   "L5_third_party_reexecutable": null
+  },
+  "utc": "2026-09-12T17:48:09Z"
+ }
+}

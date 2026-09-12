@@ -247,6 +247,8 @@ def main():
     ce.add_argument("--compare", help="report JSON from a previous `invar certify` on another machine (same workload)")
     ce.add_argument("--label", default="", help="how to describe this machine in the report/compare")
     ce.add_argument("--out", required=True, help="output directory (report.md, report.json, certification.json)")
+    ce.add_argument("--extra-body", default="", help="JSON merged into every request body (e.g. OpenRouter provider pinning)")
+    ce.add_argument("--header", action="append", default=[], help="extra HTTP header 'Name: value' (repeatable)")
     ce.add_argument("--sign", choices=["software", "tpm2"], help="sign the certification manifest with the INVAR key store")
     ce.add_argument("--reexec-binary", default="", help="L5: llama.cpp binary to re-execute the endpoint's receipts with")
     ce.add_argument("--reexec-model", default="", help="L5: the GGUF the receipts pin")
@@ -315,6 +317,8 @@ def main():
                       repeats=a.repeats, max_tokens=a.max_tokens, top_logprobs=a.top_logprobs, seed=a.seed,
                       workers=a.workers, timeout=a.timeout, compare=cmp_, compare_label=(cmp_ or {}).get("label", ""),
                       reexec_binary=a.reexec_binary, reexec_model=a.reexec_model, reexec_cross_deployment=a.reexec_cross_deployment, work_dir=a.out,
+                      extra_body=(json.loads(a.extra_body) if a.extra_body else None),
+                      extra_headers={k.strip(): v.strip() for k, v in (h.split(":", 1) for h in a.header)} or None,
                       log=lambda m: print(m, file=sys.stderr))
         rep["_observations"]["label"] = a.label or a.url
         cert = {"manifest": rep["manifest"], "certificate": rep["certificate"]}

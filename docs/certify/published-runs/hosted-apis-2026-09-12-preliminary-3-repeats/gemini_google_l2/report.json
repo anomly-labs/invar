@@ -1,0 +1,70 @@
+{
+ "tool": "invar-certify/0.1",
+ "utc": "2026-09-12T17:18:47Z",
+ "endpoint": "https://openrouter.ai/api/v1",
+ "model": "google/gemini-2.5-flash",
+ "extra_body": {
+  "provider": {
+   "order": [
+    "Google"
+   ],
+   "allow_fallbacks": false
+  }
+ },
+ "workload": {
+  "n": 10,
+  "shared": 6,
+  "fillers": 4,
+  "long_fillers": 3,
+  "repeats": 3,
+  "workers": 8,
+  "max_tokens": 24,
+  "top_logprobs": 5,
+  "seed": 0,
+  "digest": "e55b082bdb0b41c08993e58ab0d2cb3e9233886559e5f778e5e1d88f97a36be4"
+ },
+ "results": {
+  "distinct_workload_outputs": 1,
+  "repeat_pairs_differ": 0,
+  "repeat_pairs_total": 3,
+  "max_logprob_delta": 0.0,
+  "token_divergence": false,
+  "solo_vs_concurrent_differ": 0,
+  "errors": 0,
+  "cross": null,
+  "l5": null,
+  "observations_digest": "564de6fa9de4386a2c543f1eea8d8f60c930637a4ad9d8d086f0e047f9274c4e"
+ },
+ "ladder": {
+  "L0_run_to_run_deterministic": true,
+  "L1_batch_invariant": true,
+  "L2_schedule_shape_invariant": true,
+  "L3_L4_cross_machine_identical": null,
+  "L5_third_party_reexecutable": null
+ },
+ "certificate": "sha256:2c4bba85ccefaff6e27f2aaa6d64f38bc1ae69177a646cc777070950aa46d1cd",
+ "manifest": {
+  "profile": "invar-certify-v0",
+  "tool": "invar-certify/0.1",
+  "endpoint": "https://openrouter.ai/api/v1",
+  "model": "google/gemini-2.5-flash",
+  "extra_body": {
+   "provider": {
+    "order": [
+     "Google"
+    ],
+    "allow_fallbacks": false
+   }
+  },
+  "workload_sha256": "e55b082bdb0b41c08993e58ab0d2cb3e9233886559e5f778e5e1d88f97a36be4",
+  "observations_sha256": "564de6fa9de4386a2c543f1eea8d8f60c930637a4ad9d8d086f0e047f9274c4e",
+  "ladder": {
+   "L0_run_to_run_deterministic": true,
+   "L1_batch_invariant": true,
+   "L2_schedule_shape_invariant": true,
+   "L3_L4_cross_machine_identical": null,
+   "L5_third_party_reexecutable": null
+  },
+  "utc": "2026-09-12T17:18:47Z"
+ }
+}

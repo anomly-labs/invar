@@ -1,0 +1,33 @@
+{
+ "manifest": {
+  "profile": "invar-certify-v0",
+  "tool": "invar-certify/0.1",
+  "endpoint": "https://openrouter.ai/api/v1",
+  "model": "anthropic/claude-sonnet-5",
+  "extra_body": {
+   "provider": {
+    "order": [
+     "Anthropic"
+    ],
+    "allow_fallbacks": false
+   }
+  },
+  "workload_sha256": "07a380a73708ac6909ed2a0fdf168284ae8cf260fa6023000414f512551ba24e",
+  "observations_sha256": "8872124a28e17fe548590f19bac65dc35e1ceb35f34ce6157ccab54281abfd5b",
+  "ladder": {
+   "L0_run_to_run_deterministic": false,
+   "L1_batch_invariant": false,
+   "L2_schedule_shape_invariant": false,
+   "L3_L4_cross_machine_identical": null,
+   "L5_third_party_reexecutable": null
+  },
+  "utc": "2026-09-12T17:52:26Z"
+ },
+ "certificate": "sha256:22f41cf4df62171c3ec3fedfc2fe5bd2de1a4cb4947c19b70071e5b0090c39e9",
+ "signature": "824464b6ae1183467954a94ae0577e86bcce9cea69e6bf668fc0ab1e17b1eedbe1f1c9f2f62145d50af6d0ae9fb782db924da11828e13401f422b7a73aa2800a",
+ "signer": {
+  "backend": "software-ed25519",
+  "key_id": "sha256:730f68dcef60314987d017310533aa113417da596265b68eb3b58c1eb2dc60df",
+  "pubkey_pem": "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAhskjvhPX2vdLFZdVBOW/bpRplWr0tYcqiy28Tl20Sqs=\n-----END PUBLIC KEY-----\n"
+ }
+}

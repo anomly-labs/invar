@@ -1,0 +1,70 @@
+{
+ "tool": "invar-certify/0.1",
+ "utc": "2026-09-12T17:52:26Z",
+ "endpoint": "https://openrouter.ai/api/v1",
+ "model": "anthropic/claude-sonnet-5",
+ "extra_body": {
+  "provider": {
+   "order": [
+    "Anthropic"
+   ],
+   "allow_fallbacks": false
+  }
+ },
+ "workload": {
+  "n": 10,
+  "shared": 6,
+  "fillers": 4,
+  "long_fillers": 2,
+  "repeats": 10,
+  "workers": 10,
+  "max_tokens": 64,
+  "top_logprobs": 5,
+  "seed": 0,
+  "digest": "07a380a73708ac6909ed2a0fdf168284ae8cf260fa6023000414f512551ba24e"
+ },
+ "results": {
+  "distinct_workload_outputs": 10,
+  "repeat_pairs_differ": 45,
+  "repeat_pairs_total": 45,
+  "max_logprob_delta": 0.0,
+  "token_divergence": false,
+  "solo_vs_concurrent_differ": 9,
+  "errors": 0,
+  "cross": null,
+  "l5": null,
+  "observations_digest": "8872124a28e17fe548590f19bac65dc35e1ceb35f34ce6157ccab54281abfd5b"
+ },
+ "ladder": {
+  "L0_run_to_run_deterministic": false,
+  "L1_batch_invariant": false,
+  "L2_schedule_shape_invariant": false,
+  "L3_L4_cross_machine_identical": null,
+  "L5_third_party_reexecutable": null
+ },
+ "certificate": "sha256:22f41cf4df62171c3ec3fedfc2fe5bd2de1a4cb4947c19b70071e5b0090c39e9",
+ "manifest": {
+  "profile": "invar-certify-v0",
+  "tool": "invar-certify/0.1",
+  "endpoint": "https://openrouter.ai/api/v1",
+  "model": "anthropic/claude-sonnet-5",
+  "extra_body": {
+   "provider": {
+    "order": [
+     "Anthropic"
+    ],
+    "allow_fallbacks": false
+   }
+  },
+  "workload_sha256": "07a380a73708ac6909ed2a0fdf168284ae8cf260fa6023000414f512551ba24e",
+  "observations_sha256": "8872124a28e17fe548590f19bac65dc35e1ceb35f34ce6157ccab54281abfd5b",
+  "ladder": {
+   "L0_run_to_run_deterministic": false,
+   "L1_batch_invariant": false,
+   "L2_schedule_shape_invariant": false,
+   "L3_L4_cross_machine_identical": null,
+   "L5_third_party_reexecutable": null
+  },
+  "utc": "2026-09-12T17:52:26Z"
+ }
+}
