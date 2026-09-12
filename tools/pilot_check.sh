@@ -5,7 +5,7 @@
 # pilot_check.sh -- the first ten minutes of a verified-inference pilot, as one command.
 #
 #   tools/pilot_check.sh --upstream http://host:port --model NAME        # attested tier: your server
-#   tools/pilot_check.sh --gguf model.gguf [--binary llama-cli]           # exact tier: INVAR serves it
+#   tools/pilot_check.sh --gguf model.gguf [--binary llama-cli] [--device MTL0 --ngl 99]   # exact tier: INVAR serves it
 #   add --witness for a CLOSED provider behind an API key (provenance record; nothing can re-execute it)
 #
 # What it does, in order, printing a one-line result for each step:
@@ -18,9 +18,11 @@
 # Nothing on your server is changed. Everything lands in ./pilot-check-<timestamp>/.
 set -eu
 WITNESS=""; UP=""; MODEL=""; GGUF=""; BINARY="${INVAR_LLAMA_BIN:-llama-cli}"; PORT="${PILOT_PORT:-8577}"; PROMPT="Explain in three sentences why floating-point summation depends on operand order."
+DEVICE="${INVAR_DEVICE:-}"; NGL="${INVAR_NGL:-}"   # exact tier: llama.cpp device / offloaded layers (e.g. --device MTL0 --ngl 99 on an Apple GPU build)
 while [ $# -gt 0 ]; do case "$1" in
   --upstream) UP="$2"; shift 2;; --model) MODEL="$2"; shift 2;; --gguf) GGUF="$2"; shift 2;;
   --binary) BINARY="$2"; shift 2;; --port) PORT="$2"; shift 2;; --prompt) PROMPT="$2"; shift 2;;
+  --device) DEVICE="$2"; shift 2;; --ngl) NGL="$2"; shift 2;;
   --witness) WITNESS="--backend witness"; shift;;
   *) echo "unknown arg $1"; exit 2;; esac; done
 [ -n "$UP" ] || [ -n "$GGUF" ] || { echo "need --upstream URL --model NAME, or --gguf FILE"; exit 2; }
@@ -42,7 +44,8 @@ if curl -s -m 2 "http://localhost:$PORT/v1/models" >/dev/null 2>&1; then
   say "2. serve: port $PORT already answers; pass --port N (or PILOT_PORT=N) for a free one"; exit 1; fi
 export INVAR_STATE="$PWD/.invar"
 if [ -n "$UP" ]; then "$INVAR" serve $WITNESS --upstream-url "$UP" --model "$MODEL" --port "$PORT" > serve.log 2>&1 &
-else "$INVAR" serve --model "$GGUF" --port "$PORT" > serve.log 2>&1 & fi
+else DEVARGS=""; [ -n "$DEVICE" ] && DEVARGS="--device $DEVICE"; [ -n "$NGL" ] && DEVARGS="$DEVARGS --ngl $NGL"
+  "$INVAR" serve --model "$GGUF" --binary "$BINARY" $DEVARGS --port "$PORT" > serve.log 2>&1 & fi
 SPID=$!; trap 'kill $SPID 2>/dev/null || true' EXIT
 i=0; while [ $i -lt 60 ]; do curl -s -m 2 "http://localhost:$PORT/v1/models" >/dev/null 2>&1 && break; sleep 1; i=$((i+1)); done
 curl -s -m 2 "http://localhost:$PORT/v1/models" >/dev/null 2>&1 || { say "2. serve: FAILED to start (see $OUT/serve.log)"; exit 1; }
@@ -50,8 +53,9 @@ say "2. serve: invar serve up on :$PORT $(grep -i 'self-test' serve.log | head -
 
 # 3. receipt
 t0=$(date +%s)
-curl -s -m 600 "http://localhost:$PORT/v1/chat/completions" -H 'Content-Type: application/json' \
-  -d "$(python3 -c "import json,sys; print(json.dumps({'messages':[{'role':'user','content':sys.argv[1]}],'max_tokens':48,'temperature':0}))" "$PROMPT")" > resp.json
+# (built without nested double quotes: bash 3.2 on macOS brace-expands the inner python literal otherwise)
+BODY=$(PILOT_PROMPT="$PROMPT" python3 -c 'import json,os; print(json.dumps({"messages":[{"role":"user","content":os.environ["PILOT_PROMPT"]}],"max_tokens":48,"temperature":0}))')
+curl -s -m 600 "http://localhost:$PORT/v1/chat/completions" -H 'Content-Type: application/json' -d "$BODY" > resp.json
 python3 - <<'PY' | tee -a summary.txt
 import json; d=json.load(open("resp.json")); r=d.get("receipt") or {}; m=r.get("manifest") or {}
 print("3. receipt: profile", m.get("profile"), "| model", (m.get("computation") or {}).get("model_name"),

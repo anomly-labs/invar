@@ -111,12 +111,15 @@ def _reexec_entry(model: str, dump: str, text_digest: str) -> tuple[bool, str]:
         try:
             from .reexec import reexec_dump
         except ImportError:
-            return False, "no reference re-executor available (install numpy or put invar-reexec on PATH)"
+            # a verifier without a re-executor cannot say anything about the entry: INDETERMINATE, not REJECT
+            return None, "no reference re-executor available (install numpy or put invar-reexec on PATH)"
         ok, why = reexec_dump(model, dump, expect_text_digest=text_digest)
         return ok, why + " [python]"
     kv = GGUF(model).kv
     chain = greedy_chain(dump_token_evals(dump), final, int(kv.get("tokenizer.ggml.eos_token_id", -1)))
-    if chain and digest_bytes(detokenize(kv, chain).encode()) == text_digest:
+    # the server certifies llama.cpp's generated text with leading/trailing newlines stripped
+    # (backends.run_llamacpp: gen.strip("\n")): compare the detokenised chain the same way
+    if chain and digest_bytes(detokenize(kv, chain).strip("\n").encode()) == text_digest:
         return True, why + f"; certified output text ({len(chain)} tokens) reproduced by the reference greedy chain"
     return False, why + "; the reference greedy chain does NOT reproduce the certified output text"
 
@@ -232,6 +235,23 @@ def main():
     sv.add_argument("statement")
     sv.add_argument("--pubkey", required=True, help="PEM public key (from /health or the signer)")
     sv.add_argument("--issuer", default=None)
+    ce = sub.add_parser("certify", help="black-box determinism certification of an OpenAI-compatible endpoint (ladder L0-L4)")
+    ce.add_argument("--url", required=True, help="base URL ending in /v1")
+    ce.add_argument("--model", required=True)
+    ce.add_argument("--api-key-file")
+    ce.add_argument("--shared", type=int, default=6); ce.add_argument("--fillers", type=int, default=2)
+    ce.add_argument("--long-fillers", type=int, default=0); ce.add_argument("--repeats", type=int, default=5)
+    ce.add_argument("--max-tokens", type=int, default=24); ce.add_argument("--top-logprobs", type=int, default=5)
+    ce.add_argument("--seed", type=int, default=0); ce.add_argument("--workers", type=int, default=0)
+    ce.add_argument("--timeout", type=float, default=600.0)
+    ce.add_argument("--compare", help="report JSON from a previous `invar certify` on another machine (same workload)")
+    ce.add_argument("--label", default="", help="how to describe this machine in the report/compare")
+    ce.add_argument("--out", required=True, help="output directory (report.md, report.json, certification.json)")
+    ce.add_argument("--sign", choices=["software", "tpm2"], help="sign the certification manifest with the INVAR key store")
+    ce.add_argument("--reexec-binary", default="", help="L5: llama.cpp binary to re-execute the endpoint's receipts with")
+    ce.add_argument("--reexec-model", default="", help="L5: the GGUF the receipts pin")
+    ce.add_argument("--reexec-cross-deployment", action="store_true", help="L5: re-execute exact-profile receipts on this machine even if the receipts pin another device (e.g. a CPU board verifying a GPU server)")
+    ce.add_argument("--state-dir", dest="c_state_dir", default=os.environ.get("INVAR_STATE", os.path.expanduser("~/.invar")))
     tg = sub.add_parser("tlog", help="transparency-log receipts (offline checks)")
     tgs = tg.add_subparsers(dest="tcmd", required=True)
     tc = tgs.add_parser("check", help="verify an inclusion receipt for a statement you hold")
@@ -281,6 +301,39 @@ def main():
               f"({docs[0][2]['summary']['accepted']} accepted, {docs[0][2]['summary']['rejected']} rejected)")
         sys.exit(0)
 
+    if a.cmd == "certify":
+        from .certify import certify, render_md
+        os.makedirs(a.out, exist_ok=True)
+        key = open(os.path.expanduser(a.api_key_file)).read().strip() if a.api_key_file else os.environ.get("INVAR_UPSTREAM_API_KEY", "")
+        cmp_ = None
+        if a.compare:
+            with open(a.compare) as f:
+                prev = json.load(f)
+            cmp_ = prev.get("_observations") or prev
+            cmp_["label"] = cmp_.get("label") or prev.get("endpoint", "")      # how the OTHER machine described itself
+        rep = certify(a.url, a.model, api_key=key, shared=a.shared, fillers=a.fillers, long_fillers=a.long_fillers,
+                      repeats=a.repeats, max_tokens=a.max_tokens, top_logprobs=a.top_logprobs, seed=a.seed,
+                      workers=a.workers, timeout=a.timeout, compare=cmp_, compare_label=(cmp_ or {}).get("label", ""),
+                      reexec_binary=a.reexec_binary, reexec_model=a.reexec_model, reexec_cross_deployment=a.reexec_cross_deployment, work_dir=a.out,
+                      log=lambda m: print(m, file=sys.stderr))
+        rep["_observations"]["label"] = a.label or a.url
+        cert = {"manifest": rep["manifest"], "certificate": rep["certificate"]}
+        if a.sign:
+            from .hwsign import make_signer
+            from .crcore import canonical_bytes
+            signer = make_signer(a.sign, a.c_state_dir)
+            cert["signature"] = signer.sign_raw(canonical_bytes(rep["manifest"])).hex()
+            cert["signer"] = {"backend": signer.backend, "key_id": signer.key_id, "pubkey_pem": signer.pubkey_pem}
+        with open(os.path.join(a.out, "certification.json"), "w") as f:
+            json.dump(cert, f, indent=1)
+        with open(os.path.join(a.out, "report.json"), "w") as f:
+            json.dump(rep, f, indent=0)
+        md = render_md(rep)
+        with open(os.path.join(a.out, "report.md"), "w") as f:
+            f.write(md)
+        print(md)
+        print(f"written to {a.out}/ (report.md, report.json, certification.json{' signed' if a.sign else ''})")
+        return
     if a.cmd == "tlog":
         from .tlog import check_receipt, check_consistency
         if a.tcmd == "check":
@@ -504,8 +557,8 @@ def main():
                                 why += "; elementwise: " + ewhy
                 if ok and a.reexec:
                     rok, rwhy = _reexec_entry(a.model, path, e["manifest"]["outputs"]["text"])
-                    ok = ok and rok
-                    why += "; reexec: " + rwhy
+                    ok = None if rok is None else (ok and rok)   # None: no re-executor here -> INDETERMINATE
+                    why += ("; reexec: " if rok is not None else "; reexec INDETERMINATE: ") + rwhy
                     if ok:
                         pt = e.get("prompt_text")
                         if pt is not None and digest_bytes(pt.encode()) != e["manifest"]["inputs"]["prompt"]:

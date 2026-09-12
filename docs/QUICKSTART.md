@@ -27,6 +27,14 @@ GGUF weights blob digest, and the decode params. Pin `--num-gpu 0` if a GPU can
 come and go on the box. Every client config is in [INTEGRATIONS.md](INTEGRATIONS.md).
 Steps 2–4 below are the llama.cpp path; the receipts are the same shape.
 
+**Apple Silicon.** The same steps work on macOS (arm64 NEON, the exact profile is a CPU build). To
+run the exact profile on the Apple GPU, build the fork with Metal enabled *inside* the profile:
+`cmake -B build-metal -DGGML_METAL=ON -DANOMLY_METAL_EXACT=ON -DCMAKE_BUILD_TYPE=Release` and serve
+with `invar serve --binary build-metal/bin/llama-cli --device MTL0 --ngl 99 ...`. Receipts minted that
+way verify on the same Mac's CPU and on an x86 host with `invar verify --cross-deployment`; the whole
+graph is bit-identical to the x86 build (measured on an M4 Pro for SmolLM2-135M, Qwen2.5-0.5B,
+Llama-3.2-1B and Mistral-7B; write-up in the fork's `docs/anomly/apple-silicon-exact-profile.md`).
+
 ## 2. Get a model
 Any llama.cpp-compatible GGUF works. A small one to start: open
 https://huggingface.co/HuggingFaceTB/SmolLM2-135M-Instruct-GGUF, download the

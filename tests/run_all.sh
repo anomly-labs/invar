@@ -60,5 +60,7 @@ python3 tests/test_detmath.py || rc=$?
 echo "== upstream backend (pinned / witness profiles) =="
 python3 tests/test_upstream_backend.py || rc=$?
 python3 tests/test_reexec_fixture.py || rc=$?
+python3 tests/test_reexec_text.py || rc=$?
 python3 tests/test_tokenizer_models.py || rc=$?
+python3 tests/test_certify.py || rc=$?
 exit $rc

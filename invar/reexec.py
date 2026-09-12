@@ -467,7 +467,9 @@ def reexec_dump(gguf_path: str, dump_path: str, max_evals: int = 0,
         final = int(np.argmax(last_logits))
         if final != eos:
             chain.append(final)
-        text = detokenize(model.g, chain)
+        # the server certifies llama.cpp's generated text with leading/trailing newlines
+        # stripped (backends.run_llamacpp: gen.strip("\n")); compare the same way
+        text = detokenize(model.g, chain).strip("\n")
         if digest_bytes(text.encode()) == expect_text_digest:
             why += f"; certified output text ({len(chain)} tokens) reproduced by the reference greedy chain"
         else:

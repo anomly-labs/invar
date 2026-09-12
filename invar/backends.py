@@ -416,8 +416,10 @@ class UpstreamError(RuntimeError):
 def _http_json(url: str, body: dict | None = None, headers: dict | None = None,
                timeout: float = 300) -> dict:
     data = json.dumps(body).encode() if body is not None else None
+    # a real User-Agent: some providers' edges (Cloudflare error 1010) refuse the urllib default
     req = urllib.request.Request(url, data=data, method="POST" if data else "GET",
-                                 headers={"Content-Type": "application/json", **(headers or {})})
+                                 headers={"Content-Type": "application/json", "User-Agent": "invar/upstream-client",
+                                          **(headers or {})})
     try:
         with urllib.request.urlopen(req, timeout=timeout) as r:
             return json.loads(r.read().decode())

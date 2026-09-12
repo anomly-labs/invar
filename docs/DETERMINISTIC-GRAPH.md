@@ -234,7 +234,11 @@ than that commit must be configured with `-DGGML_LLAMAFILE=OFF -DGGML_BLAS=OFF`.
 - Flash attention must be off (`-fa off`, now certified in `params.flash_attn`); INVAR
   passes it for every new receipt, and legacy receipts without the parameter re-execute
   with their original command line.
-- The runtime digest is still part of the pin: cross-deployment means the same binary on a
-  different device. A conformance spec that lets *different* implementations re-execute
-  each other's exact-profile receipts is the next step, and the verifiers already do it
-  for the matmuls.
+- The runtime digest is part of the pin and is reported when it differs: with
+  `--cross-deployment`, an exact-profile receipt is re-executed even by a different build of
+  this fork on a different machine (measured 2026-09-10: receipts minted by the Metal build on an
+  Apple M4 Pro GPU, `--device MTL0 --ngl 99`, verified by the x86 build on a Linux host with
+  `--device none --ngl 0` — ACCEPT, "certified runtime_digest, device, n_gpu_layers differ").
+  Float-profile entries never cross. A conformance spec that lets *different implementations*
+  re-execute each other's exact-profile receipts is the next step; the Go and Python reference
+  verifiers already do it for the whole graph from a dump (`--reexec`).

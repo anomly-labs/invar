@@ -163,7 +163,8 @@ def verify_entries(path: str, prompts: dict[str, str], backends: dict,
                    reexecute: bool = True, binding=None,
                    trusted_key_ids: set[str] | None = None,
                    require_signature: bool = False,
-                   cross_deployment: bool = False) -> list:
+                   cross_deployment: bool = False,
+                   start_prev: str | None = None) -> list:
     """Verify every entry: certificate matches its canonical manifest, the chain
     links, and (if reexecute) the pinned computation reproduces the output digest.
     Each result is (index, ok, why) with ok True (ACCEPT), False (REJECT) or None
@@ -179,7 +180,9 @@ def verify_entries(path: str, prompts: dict[str, str], backends: dict,
     digest must still match; the differing pins are reported in the reason. Float
     profiles keep the pin regardless."""
     results = []
-    prev = binding.genesis() if binding else Worldline.GENESIS
+    # start_prev: verify a contiguous TAIL of a worldline (e.g. fetched from /v1/worldline/tail): the
+    # first entry links to the given chain digest instead of the genesis.
+    prev = binding.genesis() if binding else (start_prev if start_prev is not None else Worldline.GENESIS)
     live: dict[str, dict] = {}       # (profile, model) -> deployment(), once
     inst: dict[tuple, object] = {}   # factory results, keyed the same way
     # The log can testify against its own deployment: two entries with the same request
