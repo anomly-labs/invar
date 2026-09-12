@@ -1,0 +1,52 @@
+# Copyright (c) 2026 Anomly, Inc. All rights reserved. Author: Ry Bruscoe.
+name: invar certify
+description: Black-box determinism certification of an OpenAI-compatible endpoint (ladder L0-L5); uploads the report.
+inputs:
+  url:
+    description: Base URL ending in /v1
+    required: true
+  model:
+    description: Model name the endpoint expects
+    required: true
+  api-key:
+    description: Bearer token (optional)
+    required: false
+    default: ""
+  compare:
+    description: Path to a published report.json to compare against (optional)
+    required: false
+    default: ""
+  extra-args:
+    description: Extra invar certify arguments (e.g. --shared 30 --fillers 13 --repeats 5)
+    required: false
+    default: "--repeats 3 --max-tokens 24"
+  fail-below:
+    description: Fail the job unless this rung passes (L0, L1, L2, L4, L5 or none)
+    required: false
+    default: "L1"
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      run: |
+        python3 -m pip install --quiet cryptography "git+https://github.com/anomly-labs/invar"
+        KEYFILE=""
+        if [ -n "${{ inputs.api-key }}" ]; then KEYFILE="$(mktemp)"; printf '%s' "${{ inputs.api-key }}" > "$KEYFILE"; fi
+        CMP=""; [ -n "${{ inputs.compare }}" ] && CMP="--compare ${{ inputs.compare }}"
+        KEYARG=""; [ -n "$KEYFILE" ] && KEYARG="--api-key-file $KEYFILE"
+        invar certify --url "${{ inputs.url }}" --model "${{ inputs.model }}" --out ./invar-cert $CMP $KEYARG ${{ inputs.extra-args }}
+        [ -n "$KEYFILE" ] && rm -f "$KEYFILE"
+        cat ./invar-cert/report.md >> "$GITHUB_STEP_SUMMARY"
+        python3 - <<'PY'
+        import json, os, sys
+        r = json.load(open("invar-cert/report.json"))["ladder"]
+        want = "${{ inputs.fail-below }}".strip().upper()
+        key = {"L0": "L0_run_to_run_deterministic", "L1": "L1_batch_invariant", "L2": "L2_schedule_shape_invariant",
+               "L4": "L3_L4_cross_machine_identical", "L5": "L5_third_party_reexecutable"}.get(want)
+        if key and r.get(key) is not True:
+            print(f"invar certify: {want} not passed ({r.get(key)})"); sys.exit(1)
+        PY
+    - uses: actions/upload-artifact@v4
+      with:
+        name: invar-certification
+        path: invar-cert/

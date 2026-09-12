@@ -32,6 +32,27 @@ entry 0: ACCEPT — re-executed, output digest matches
 
 Edit one byte of the log and verification **REJECTS**. That's the product.
 
+## Certify any endpoint — yours, a vendor's, ours
+
+`invar certify` is a black-box determinism test for any OpenAI-compatible API. It sends one workload
+concurrently, repeats it against the unchanged server, runs every request alone, compares tokens and
+logprobs as exact doubles, and grades the endpoint on a ladder:
+
+```
+$ invar certify --url http://localhost:8000/v1 --model my-model --out ./cert
+```
+
+| level | property | stock vLLM (RTX 5090) | INVAR exact profile |
+|---|---|---|---|
+| L0 | run-to-run deterministic | fail (3–5 distinct outputs) | pass |
+| L1 | batch invariant | fail | pass |
+| L2 | shape invariant (long-prefix fillers) | fail | pass |
+| L4 | identical to another machine (`--compare`) | — | pass: CUDA, x86, Apple Metal, Cortex-A53, Blackhole bit-identical |
+| L5 | a stranger re-executes the receipts | no receipts | pass |
+
+Measured 2026-09-12; reports and a published run to compare against are in
+[`docs/certify/`](docs/certify/). Details: [`docs/CERTIFY.md`](docs/CERTIFY.md).
+
 ![INVAR in action — install, ask, receipt, verify, tamper, reject](docs/demo.svg)
 
 ## Install
