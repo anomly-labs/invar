@@ -20,7 +20,7 @@ import hashlib, itertools, json, os, sys, time
 from concurrent.futures import ThreadPoolExecutor
 from typing import Optional
 
-import requests
+import urllib.error, urllib.request
 
 from .crcore import canonical_bytes, certificate_of
 
@@ -51,21 +51,33 @@ def build_workload(n_shared: int, n_fillers: int, long_fillers: int = 0, long_wo
     return reqs + fill
 
 
+def _http(method: str, url: str, headers: dict, body: Optional[dict], timeout: float):
+    """stdlib HTTP (INVAR stays stdlib + cryptography): returns (status, json-or-None); 429 is retried with backoff."""
+    data = json.dumps(body).encode() if body is not None else None
+    for attempt in range(8):
+        req = urllib.request.Request(url, data=data, headers=headers, method=method)
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as r:
+                return r.status, json.loads(r.read().decode() or "null")
+        except urllib.error.HTTPError as e:
+            if e.code == 429:
+                time.sleep(float(e.headers.get("retry-after") or 0) or 4 * (attempt + 1)); continue
+            return e.code, None
+        except (urllib.error.URLError, TimeoutError, OSError):
+            return 0, None
+    return 429, None
+
+
 def _one(url: str, key: str, model: str, prompt: str, max_tokens: int, top_logprobs: int, seed: int, timeout: float) -> dict:
     body = {"model": model, "messages": [{"role": "user", "content": prompt}], "temperature": 0,
             "max_tokens": max_tokens, "seed": seed, "logprobs": True, "top_logprobs": top_logprobs, "stream": False}
     h = {"Content-Type": "application/json", "User-Agent": TOOL}
     if key:
         h["Authorization"] = f"Bearer {key}"
-    r = None
-    for attempt in range(8):
-        r = requests.post(f"{url}/chat/completions", headers=h, json=body, timeout=timeout)
-        if r.status_code != 429:
-            break
-        time.sleep(float(r.headers.get("retry-after") or 0) or 4 * (attempt + 1))
-    if r is None or r.status_code != 200:
-        return {"error": f"HTTP {getattr(r, 'status_code', '?')}: {getattr(r, 'text', '')[:200]}"}
-    ch = r.json()["choices"][0]
+    status, j = _http("POST", f"{url}/chat/completions", h, body, timeout)
+    if status != 200 or not j:
+        return {"error": f"HTTP {status}"}
+    ch = j["choices"][0]
     toks = [{"tok": t.get("token"), "lp": t.get("logprob"),
              "top": [[a.get("token"), a.get("logprob")] for a in (t.get("top_logprobs") or [])]}
             for t in ((ch.get("logprobs") or {}).get("content") or [])]
@@ -108,13 +120,10 @@ def l5_receipts(url: str, key: str, solo: list[dict], n_tail: int, reexec_binary
     h = {"User-Agent": TOOL}
     if key:
         h["Authorization"] = f"Bearer {key}"
-    try:
-        r = requests.get(f"{url}/worldline/tail?n={min(max(n_tail, 1), 100)}", headers=h, timeout=60)
-    except requests.RequestException:
+    status, j = _http("GET", f"{url}/worldline/tail?n={min(max(n_tail, 1), 100)}", h, None, 60)
+    if status != 200 or not isinstance(j, dict):
         return None
-    if r.status_code != 200:
-        return None
-    entries = (r.json() or {}).get("entries") or []
+    entries = j.get("entries") or []
     if not entries:
         return {"receipts": 0}
     path = os.path.join(work_dir or ".", "endpoint_worldline_tail.jsonl")
