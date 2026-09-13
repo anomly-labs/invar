@@ -40,6 +40,14 @@ def digest_file(path: str) -> str:
             h.update(chunk)
     return "sha256:" + h.hexdigest()
 
+def _digest_if_present(path: str | None) -> str | None:
+    if not path:
+        return None
+    try:
+        return digest_file(path)
+    except FileNotFoundError:
+        return None
+
 
 class AttestationBinding:
     """Immutable description of the platform evidence a worldline is bound to."""
@@ -52,8 +60,10 @@ class AttestationBinding:
         self.verifier = verifier
         self.verdict_path = verdict_path
         self.nonce = nonce or secrets.token_hex(16)
-        self.evidence_digest = digest_file(evidence_path) if evidence_path else None
-        self.verdict_digest = digest_file(verdict_path) if verdict_path else None
+        # digest the evidence if it is reachable; a missing file is not fatal here because load()
+        # restores the authoritative digests saved with the binding (the evidence may have moved).
+        self.evidence_digest = _digest_if_present(evidence_path)
+        self.verdict_digest = _digest_if_present(verdict_path)
 
     @classmethod
     def none(cls) -> "AttestationBinding":
@@ -91,8 +101,16 @@ class AttestationBinding:
     def load(cls, path: str) -> "AttestationBinding":
         with open(path) as f:
             d = json.load(f)
-        b = cls(d["kind"], d.get("evidence_path"), d.get("verifier"),
-                d.get("verdict_path"), d.get("nonce"))
+        # a relative evidence/verdict path is resolved against the binding file's own directory, so a
+        # binding stays usable from any working directory (invar serve resolved it against its cwd before).
+        base = os.path.dirname(os.path.abspath(path))
+        def _resolve(rel):
+            if not rel or os.path.isabs(rel):
+                return rel
+            cand = os.path.join(base, rel)
+            return cand if os.path.exists(cand) else rel
+        b = cls(d["kind"], _resolve(d.get("evidence_path")), d.get("verifier"),
+                _resolve(d.get("verdict_path")), d.get("nonce"))
         # the saved digests are authoritative if the evidence file moved
         if b.evidence_digest is None:
             b.evidence_digest = d.get("evidence_digest")
