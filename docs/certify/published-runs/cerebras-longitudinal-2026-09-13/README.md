@@ -1,12 +1,19 @@
-# Cerebras, 46 hours of hourly checkpoints: deterministic every hour, changed twice across days
+# Cerebras, 90 hours of hourly checkpoints: deterministic every hour, changed three times across days
 
 Copyright (c) 2026 Anomly, Inc. Author: Ry Bruscoe.
 
-**One sentence:** over ~46 hours (2026-09-11 17:37Z to 2026-09-13 16:01Z) we sent the same
+**One sentence:** over ~90 hours (2026-09-11 17:37Z to 2026-09-14 11:58Z) we sent the same
 prompt to two models on the Cerebras Inference API roughly every hour, ten times per hour, at
 temperature 0 with a fixed seed. Every hour, all ten answers were byte-identical. Across hours,
-`qwen-3.8-27b` never changed; `gpt-oss-120b` changed twice, each time in the same ~midnight-UTC
-window one day apart, and was otherwise stable for long stretches.
+`qwen-3.8-27b` never changed; `gpt-oss-120b` changed three times, each time in the same
+~midnight-UTC window on consecutive days, and was otherwise stable for long stretches.
+
+**Updated 2026-09-14.** The first published version of this note covered 46 hours and two
+transitions. It said the two changes fell in the same ~23:00Z–01:00Z window one day apart, which
+is the kind of pattern two events can produce by chance. Extending the run caught a **third**
+transition, in the same window again, on the next consecutive day. The prediction the note
+closed with — that `qwen-3.8-27b` would still digest to `1e90d60aab37` — has held through all
+72 checkpoints.
 
 This is a follow-on to the [hosted-API certification run](../hosted-apis-2026-09-12/), where
 Cerebras was the only hosted endpoint to pass the run-to-run (L0) and batch-invariance (L1)
@@ -43,11 +50,18 @@ The `gpt-oss-120b` sequence, in order:
 |---|---|---|
 | 09-11 17:37Z to 09-11 23:03Z | 7 | `824475162456` |
 | 09-12 00:06Z to 09-12 23:35Z | 27 | `acfd1e0b36ef` |
-| 09-13 00:54Z to 09-13 16:01Z | 16 | `4645300ae76f` |
+| 09-13 00:54Z to 09-13 23:36Z | 25 | `4645300ae76f` |
+| 09-14 00:33Z to 09-14 11:58Z | 13 | `022d6aeff2d5` |
 
-Both transitions fall between a ~23:00Z checkpoint and the next ~00:00Z–01:00Z checkpoint, one
-day apart. The 09-12/13 change moved the answer at character 149 ("solution" → "version") and
-the whole tail after it. Within each span the answer was bit-identical every hour.
+**All three transitions fall between a ~23:00Z checkpoint and the next ~00:00Z–01:00Z
+checkpoint, on consecutive days.** The 09-12/13 change moved the answer at character 149
+("solution" → "version") and the whole tail after it. Within each span the answer was
+bit-identical every hour — including the 25-checkpoint span, the longest observed.
+
+Three events in the same window is a pattern, not a law: it is consistent with a scheduled daily
+operation and we would expect it to break the first time an unscheduled one happens. It is
+reported because it is what the data shows, and because it is checkable — the next transition
+either lands in that window or it does not.
 
 ## How to read this
 
@@ -55,7 +69,7 @@ the whole tail after it. Within each span the answer was bit-identical every hou
   answers, at every one of 100 model-checkpoints. That is rare among hosted endpoints (see the
   hosted-API run) and is to the provider's credit.
 - **Determinism within an hour is not reproducibility across time.** The same input produced
-  three different outputs over two days. The most likely reading is an ordinary operational
+  four different outputs over three days. The most likely reading is an ordinary operational
   event on the provider's side (a redeploy, a kernel or weight change, a routing change) that
   happens in a maintenance window. That is not a fault. It is normal operations.
 - **The API does not announce it.** Nothing in the response distinguishes the 09-12 answer from
@@ -70,10 +84,10 @@ the whole tail after it. Within each span the answer was bit-identical every hou
 
 ## What this does not say
 
-- It does not say anything about answer *quality*; all three `gpt-oss-120b` answers are
+- It does not say anything about answer *quality*; all four `gpt-oss-120b` answers are
   plausible responses to the prompt.
-- It does not identify the cause. We observe two changes; we do not know what they were.
-- It is one prompt, two models, one provider, one 46-hour window. A snapshot, not a
+- It does not identify the cause. We observe three changes; we do not know what they were.
+- It is one prompt, two models, one provider, one 90-hour window. A snapshot, not a
   characterization of Cerebras or of hosted inference in general.
 
 ## Excluded runs (for completeness)
@@ -91,5 +105,6 @@ the whole tail after it. Within each span the answer was bit-identical every hou
 python3 research/cerebras/cerebras_sweep.py --models qwen-3.8-27b gpt-oss-120b --repeats 10 --interval 3
 ```
 then hash each returned text with SHA-256 and compare the first 12 hex within and across runs.
-Your digests for `qwen-3.8-27b` should be `1e90d60aab37` if the deployment has not changed since
-2026-09-13 16:01Z; if they are not, you have observed the next transition.
+Your digests for `qwen-3.8-27b` should be `1e90d60aab37` if that deployment has not changed since
+2026-09-11, and `gpt-oss-120b` should be `022d6aeff2d5` if it has not changed since
+2026-09-14 00:33Z. If either differs, you have observed a transition after ours.
